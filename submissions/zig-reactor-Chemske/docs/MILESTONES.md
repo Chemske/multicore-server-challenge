@@ -89,6 +89,29 @@ Date: 2026-10-24. Article lists, the personal feed and single-article reads are 
 
 No new tools or automatic services were installed. Temporary databases/servers are removed. Complete logs and normalized transcripts are under work/results/milestone4; selected evidence is copied to outputs. Optimisation, Linux runtime validation and an official score remain outstanding.
 
+## Milestone 5: execution plan
+
+Complete article writes, favourite writes and all comment routes. Validate authentication and request bodies before starting SQL. Ownership predicates belong in the mutation itself; status results distinguish missing targets (404) from another author's rows (403).
+
+Article creation uses an explicit transaction: BEGIN, insert article, insert distinct tags, link tags, COMMIT, then read the committed article by ID. A fresh statement after tag upserts avoids the data-modifying-CTE snapshot trap for new or concurrently inserted tags. Failures drain completely, roll back and retain the original error. A failed rollback or an uncertain connection state retires the database connection. Writes are never automatically replayed after connection loss.
+
+Other mutations use parameterized statements and committed follow-up reads where required. Comments list the newest 100 by timestamp and ID; creation returns author.following false, as specified. Deletes return a bodyless 204 with no Content-Length. Request-owned operation state must survive disconnects until its transaction is finished and drained.
+
+The gate is the full unchanged 197-step suite, normalized comparison with the unchanged Go reference, focused rollback/commit/ownership/concurrency checks and the existing regressions. No performance or Linux-runtime claim is implied by the Mac correctness run.
+
+## Milestone 5: results
+
+Date: 2026-10-24. All API routes are implemented, including article writes, favourite writes and comments. operations.zig owns their query stages and transaction lifecycle; requests.zig validates and retains their parameters. The comment result decoder shares existing typed profile and timestamp conventions.
+
+- ReleaseSafe build and twelve unit checks passed. Linux x86_64 semantic/object-only compilation passed; no linked Linux runtime has been run.
+- The unchanged official test/run.sh runner passed 197/197 on a fresh development-seed clone.
+- The focused harness and unchanged Go reference each passed 197/197. All 197 normalized transcript entries match exactly.
+- Fifteen write scenarios passed: full suite; normalized comparison; committed articles/tags/links; validation and ownership; tag/link rollback; deferred commit failure; blocked transaction visibility; eight simultaneous Zig/Go creates sharing a new tag; 64 favourite writes; concurrent comment IDs/newest-100 ordering/self-follow semantics; scoped comment deletion; failed post-commit read; disconnect during creation; bodyless-204 pipelining/cascades; backend loss without write replay.
+- Separate sessions confirm committed rows and idle transaction state. Failed tag/link/commit stages leave no partial article or newly introduced tags. A successful commit followed by a failed response query leaves exactly one article and returns 503 without replay.
+- Earlier gates remain green: 11 tags scenarios, 13 auth scenarios, 15 profile scenarios and 15 article/feed scenarios. The profile gate now reaches and compares all 18 profile calls.
+
+No new application, dependency or automatic service was installed. All disposable databases/servers were removed. The complete evidence is in work/results/milestone5, with selected deliverables in outputs. The test seed has 10k articles; full-seed, clean Linux installation/runtime, recovery improvements and capacity benchmarking remain outstanding. No leaderboard score is claimed.
+
 ## Next checkpoint
 
-Add the remaining writes, comments and favourites. Reconnection and additional protocol coverage belong before optimisation. Batching and pipeline depth are later controlled experiments against this simple execution path.
+Add recovery and complete protocol/runtime validation before optimisation. Batching and pipeline depth are later controlled experiments against this simple execution path.

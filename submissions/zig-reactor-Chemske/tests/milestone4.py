@@ -78,7 +78,7 @@ with server('zig_contract', submission / 'zig-out/bin/conduit') as zig, server('
     assert all(step == expected[step['step']] for step in prefix)
     passed('119 upstream steps before favourite writes pass, including all 51 article/feed read steps')
     passed('all 119 normalized responses match the unchanged Go reference, including all 51 reads')
-    print('Zig full upstream run (writes/comments remain incomplete): ' + summary, flush=True)
+    print('Zig full upstream run: ' + summary, flush=True)
     print('Unchanged Go reference: ' + golden_summary, flush=True)
 
 # Fresh clones prevent later reference writes from contaminating the differential read fixtures.

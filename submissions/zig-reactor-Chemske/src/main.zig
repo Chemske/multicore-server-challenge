@@ -100,6 +100,7 @@ const Server = struct {
             201 => "Created",
             400 => "Bad Request",
             401 => "Unauthorized",
+            403 => "Forbidden",
             404 => "Not Found",
             413 => "Content Too Large",
             422 => "Unprocessable Content",
@@ -107,7 +108,10 @@ const Server = struct {
             505 => "HTTP Version Not Supported",
             else => "Service Unavailable",
         };
-        client.output = try std.fmt.allocPrint(self.allocator, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n{s}", .{ status, reason, body.len, if (client.keep_alive) @as([]const u8, "keep-alive") else "close", body });
+        client.output = if (status == 204)
+            try std.fmt.allocPrint(self.allocator, "HTTP/1.1 204 No Content\r\nConnection: {s}\r\n\r\n", .{if (client.keep_alive) @as([]const u8, "keep-alive") else "close"})
+        else
+            try std.fmt.allocPrint(self.allocator, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n{s}", .{ status, reason, body.len, if (client.keep_alive) @as([]const u8, "keep-alive") else "close", body });
         client.sent = 0;
         client.state = .writing;
         client.last_activity = self.now();
@@ -133,7 +137,7 @@ const Server = struct {
                 const task = requests.Task.create(self.allocator, request, .{ .index = index, .generation = client.generation }, self.secret, self.wallTime()) catch |err| {
                     consume(client, request.consumed);
                     if (err == error.InvalidPath) client.keep_alive = false;
-                    const status: u16 = if (err == error.Unauthorized) 401 else if (err == error.InvalidPath) 400 else if (err == error.Validation) 422 else 503;
+                    const status: u16 = if (err == error.Unauthorized) 401 else if (err == error.NotFound) 404 else if (err == error.InvalidPath) 400 else if (err == error.Validation) 422 else 503;
                     try self.respond(index, status, "{\"errors\":{\"body\":[\"invalid request\"]}}");
                     return;
                 };
@@ -296,13 +300,36 @@ const Server = struct {
             const task = self.active.?;
             const result = pg.PQgetResult(connection) orelse {
                 // The statement is fully drained, including its transaction completion.
+                if (task.operation) |*operation| {
+                    if ((operation.stage == .commit or operation.stage == .rollback) and pg.PQtransactionStatus(connection) != 0) {
+                        self.databaseFailed();
+                        return;
+                    }
+                    if (operation.stage == .rollback and task.status != 200) {
+                        self.databaseFailed();
+                        return;
+                    }
+                    if (operation.stage == .commit and task.status != 200) operation.transaction = false;
+                    // Keep transaction ownership even when the HTTP recipient has gone away.
+                    if (operation.advance(task.status)) {
+                        task.status = 503;
+                        self.active_since = self.now();
+                        task.send(connection) catch {
+                            self.databaseFailed();
+                            return;
+                        };
+                        try self.databaseReady(false);
+                        return;
+                    }
+                    task.status = if (operation.http_status >= 400) operation.http_status else 200;
+                }
                 if (self.isLive(task) and task.status == 200) {
                     if (task.read) |*read| {
                         if (read.family != .single and read.phase == .page) {
                             read.phase = .count;
                             task.status = 503;
                             self.active_since = self.now();
-                            pg.query(connection, task.route, task.params[0..task.param_count], task.read) catch {
+                            task.send(connection) catch {
                                 self.databaseFailed();
                                 return;
                             };
@@ -316,6 +343,16 @@ const Server = struct {
                     task.destroy(self.allocator);
                 } else if (task.status != 200) {
                     self.finish(task, task.status, "{\"errors\":{\"body\":[\"query failed\"]}}");
+                } else if (task.operation) |operation| {
+                    if (operation.http_status == 204) {
+                        self.finish(task, 204, "");
+                    } else {
+                        const body = operation.json(task.arena.allocator()) catch {
+                            self.finish(task, 503, "{\"errors\":{\"body\":[\"operation response unavailable\"]}}");
+                            return;
+                        };
+                        self.finish(task, operation.http_status, body);
+                    }
                 } else if (task.read) |read| {
                     const body = read.json(task.arena.allocator()) catch {
                         self.finish(task, 503, "{\"errors\":{\"body\":[\"article response unavailable\"]}}");
@@ -338,7 +375,9 @@ const Server = struct {
             defer pg.PQclear(result);
             task.status = pg.status(result);
             if (task.status != 200) continue;
-            if (task.read) |*read| {
+            if (task.operation) |*operation| {
+                task.status = pg.operationResult(result, operation, task.arena.allocator()) catch 503;
+            } else if (task.read) |*read| {
                 if (read.phase == .page) {
                     read.rows = pg.articlePage(result, task.arena.allocator(), read.family == .single) catch {
                         task.status = 503;
@@ -382,7 +421,7 @@ const Server = struct {
         };
         self.active = task;
         self.active_since = self.now();
-        pg.query(connection, task.route, task.params[0..task.param_count], task.read) catch {
+        task.send(connection) catch {
             self.databaseFailed();
             return;
         };
@@ -490,7 +529,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..clients.len) |index| server.closeClient(index);
         if (server.active) |task| task.destroy(allocator);
     }
-    std.log.info("milestone 4: article/feed reads, tags, users and profiles on {s}:{d}; one database connection, two bcrypt workers", .{ host, port });
+    std.log.info("milestone 5: all API routes on {s}:{d}; one database connection, two bcrypt workers", .{ host, port });
     try server.run();
 }
 

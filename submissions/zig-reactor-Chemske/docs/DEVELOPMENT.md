@@ -57,7 +57,7 @@ bash seed/make-seed.sh
 TEMPLATE=conduit_seed bash test/run.sh submissions/zig-reactor-Chemske
 ```
 
-A full conformance pass remains future work. The Zig server currently implements tags, the four users/auth routes, profiles/follows and article/feed reads. The milestone tests run the unchanged suite and record the expected later failures. Seed creation replaces the named seed database, so it belongs in the dedicated project cluster. The dev helper preserves an existing seed instead of replacing it. Test/run creates and removes a temporary database. Load tests need separate disposable copies because they mutate data. Local development-seed load runs use 10,000 seeded articles rather than the full-data default.
+Development-seed conformance now passes for the complete Zig API. Full-seed conformance, Linux runtime validation and capacity measurements remain future work. The milestone tests run the unchanged suite; older result files preserve their checkpoint failures. Seed creation replaces the named seed database, so it belongs in the dedicated project cluster. The dev helper preserves an existing seed instead of replacing it. Test/run creates and removes a temporary database. Load tests need separate disposable copies because they mutate data. Local development-seed load runs use 10,000 seeded articles rather than the full-data default.
 
 The Mac's six cores and 8 GiB RAM cannot reproduce the official Linux target. Keep local load within host limits, monitor generator saturation and memory pressure, and never label local capacity as an official score. Linux CI is a required compatibility check; the organiser's benchmark determines the ranking. No remote server rental is part of this plan.
 
@@ -93,6 +93,8 @@ At milestone 4, work occupies about 1.7 GiB, including the 485 MiB database clus
 Milestone 4 adds no installed tools. Shared Python test helpers use only the existing standard library; dev/env.sh disables bytecode writes to keep imports from adding cache directories beside source. All reference executables and read-test evidence stay in work/tools and work/results/milestone4. Contract comparisons and custom fixtures use separate successive pairs of disposable clones so the reference's later writes cannot affect differential reads.
 
 The count-failure check temporarily enables row-level security and a test-only policy/function inside its private Zig clone. It rejects only count statements after a page succeeds, then removes the policy/function and disables row-level security. The official schema file, seed and interactive database remain unchanged. This is failure injection, not part of installation, the application runtime or a capacity run.
+
+Milestone 5 adds no software or service installation. Its complete upstream/reference transcripts, the official runner log and write-failure evidence live in work/results/milestone5. The fault-injection triggers and temporary permission changes affect only disposable test clones and are removed. A short-lived unchanged Go reference also writes to the same private clone to exercise concurrent tag creation; no external database is used. Temporary servers and databases are removed even on test failure. The footprint remains about 1.7 GiB under work, including the 485 MiB dedicated database cluster.
 
 ## Repository policy
 

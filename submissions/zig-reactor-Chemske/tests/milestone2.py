@@ -128,7 +128,7 @@ try:
     assert not any(line.startswith('FAIL tags.') for line in suite.stdout.splitlines())
     passed(f'unchanged upstream users/auth: {len(auth_lines)} steps passed')
     summary = next(line for line in suite.stdout.splitlines() if re.match(r'^\d+ steps,', line))
-    print('Upstream full run (later endpoints are still unimplemented): ' + summary, flush=True)
+    print('Upstream full run: ' + summary, flush=True)
 
     user = {'username': "m2_quote_'_é", 'email': "m2_'_é@example.com", 'password': 'p' * 72}
     status, result = request('POST', '/api/users', {'user': user}, headers={'Authorization': 'bad'})

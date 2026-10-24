@@ -86,8 +86,13 @@ class Server:
         try:
             connection.request(method, path, body=body, headers=fields)
             response = connection.getresponse()
-            data = json.loads(response.read())
-            assert response.getheader('Content-Type') == 'application/json'
+            raw = response.read()
+            if response.status == 204:
+                assert raw == b''
+                data = None
+            else:
+                data = json.loads(raw)
+                assert response.getheader('Content-Type') == 'application/json'
             if response.status >= 400:
                 assert set(data) == {'errors'} and isinstance(data['errors']['body'][0], str)
             return response.status, data
@@ -126,6 +131,9 @@ def raw_response(reader):
         assert line
         key, value = line.decode().split(':', 1)
         headers[key.lower()] = value.strip()
+    if status == 204:
+        assert 'content-length' not in headers
+        return status, None
     return status, json.loads(reader.read(int(headers['content-length'])))
 
 

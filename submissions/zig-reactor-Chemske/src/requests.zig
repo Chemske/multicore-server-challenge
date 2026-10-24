@@ -5,6 +5,7 @@ const pg = @import("postgres.zig");
 const bcrypt = @import("bcrypt_pool.zig");
 const url = @import("url.zig");
 const articles = @import("articles.zig");
+const operations = @import("operations.zig");
 
 pub const Recipient = struct { index: usize, generation: u32 };
 pub const Task = struct {
@@ -20,6 +21,7 @@ pub const Task = struct {
     status: u16 = 503,
     body: ?[]const u8 = null,
     read: ?articles.Read = null,
+    operation: ?operations.Operation = null,
 
     pub fn create(allocator: std.mem.Allocator, request: http.Request, recipient: Recipient, secret: []const u8, now: i64) !*Task {
         const self = try allocator.create(Task);
@@ -32,6 +34,24 @@ pub const Task = struct {
             if (request.route == .current or request.route == .update) self.token = try a.dupe(u8, identity.token);
             self.params[0] = try std.fmt.allocPrintSentinel(a, "{d}", .{identity.id}, 0);
         } else if (policy == .optional) self.params[0] = "0";
+        if (request.route.isOperation()) {
+            self.operation = operations.Operation.init(request.route);
+            if (request.route != .create_article) self.params[1] = try url.pathSegment(a, request.argument);
+            self.param_count = 2;
+            if (request.route == .delete_comment) {
+                const id = url.pathSegment(a, request.secondary) catch return error.NotFound;
+                if (id.len == 0) return error.NotFound;
+                for (id) |ch| if (ch < '0' or ch > '9') return error.NotFound;
+                const number = std.fmt.parseInt(i64, id, 10) catch return error.NotFound;
+                self.params[2] = try std.fmt.allocPrintSentinel(a, "{d}", .{number}, 0);
+                self.param_count = 3;
+            }
+            switch (request.route) {
+                .create_article, .update_article, .create_comment => try self.operationBody(request),
+                else => {},
+            }
+            return self;
+        }
         if (request.route.isProfile()) {
             self.params[1] = try url.pathSegment(a, request.argument);
             self.param_count = 2;
@@ -98,6 +118,48 @@ pub const Task = struct {
             else => unreachable,
         }
         return self;
+    }
+
+    fn operationBody(self: *Task, request: http.Request) !void {
+        const a = self.arena.allocator();
+        const parsed = std.json.parseFromSlice(std.json.Value, a, request.body, .{ .allocate = .alloc_always }) catch return error.Validation;
+        if (parsed.value != .object) return error.Validation;
+        const key = if (request.route == .create_comment) "comment" else "article";
+        const wrapper = parsed.value.object.get(key) orelse return error.Validation;
+        if (wrapper != .object) return error.Validation;
+        const object = wrapper.object;
+        if (request.route == .create_comment) {
+            self.params[2] = try text(a, object, "body", true, false);
+            self.param_count = 3;
+        } else if (request.route == .update_article) {
+            self.params[2] = try text(a, object, "title", false, false);
+            self.params[3] = try text(a, object, "description", false, false);
+            self.params[4] = try text(a, object, "body", false, false);
+            self.param_count = 5;
+        } else {
+            self.params[1] = try text(a, object, "title", true, false);
+            self.params[2] = try text(a, object, "description", true, false);
+            self.params[3] = try text(a, object, "body", true, false);
+            self.params[4] = "[]";
+            self.param_count = 5;
+            if (object.get("tagList")) |list| {
+                if (list == .null) return;
+                if (list != .array) return error.Validation;
+                for (list.array.items) |value| {
+                    if (value != .string or value.string.len == 0 or std.mem.indexOfScalar(u8, value.string, 0) != null) return error.Validation;
+                }
+                const json = try std.json.Stringify.valueAlloc(a, list, .{});
+                self.params[4] = try a.dupeSentinel(u8, json, 0);
+                self.operation.?.has_tags = list.array.items.len != 0;
+            }
+        }
+    }
+
+    pub fn send(self: *Task, connection: *pg.Conn) !void {
+        if (self.operation) |operation| {
+            const q = operation.query(self.params[0..self.param_count]);
+            try pg.send(connection, q.statement, q.params[0..q.count]);
+        } else try pg.query(connection, self.route, self.params[0..self.param_count], self.read);
     }
 
     fn text(a: std.mem.Allocator, object: std.json.ObjectMap, key: []const u8, required: bool, allow_empty: bool) !?[:0]const u8 {

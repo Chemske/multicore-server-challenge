@@ -18,12 +18,20 @@ pub const Route = enum {
     articles,
     feed,
     article,
+    create_article,
+    update_article,
+    delete_article,
+    favorite,
+    unfavorite,
+    comments,
+    create_comment,
+    delete_comment,
     unknown,
 
     pub fn auth(self: Route) Auth {
         return switch (self) {
-            .current, .update, .follow, .unfollow, .feed => .required,
-            .profile, .articles, .article => .optional,
+            .current, .update, .follow, .unfollow, .feed, .create_article, .update_article, .delete_article, .favorite, .unfavorite, .create_comment, .delete_comment => .required,
+            .profile, .articles, .article, .comments => .optional,
             else => .none,
         };
     }
@@ -32,11 +40,14 @@ pub const Route = enum {
         return self == .profile or self == .follow or self == .unfollow;
     }
 
-    pub fn isArticle(self: Route) bool {
-        return self == .articles or self == .feed or self == .article;
+    pub fn isOperation(self: Route) bool {
+        return switch (self) {
+            .create_article, .update_article, .delete_article, .favorite, .unfavorite, .comments, .create_comment, .delete_comment => true,
+            else => false,
+        };
     }
 };
-pub const Request = struct { consumed: usize, route: Route, argument: []const u8, query: []const u8, keep_alive: bool, body: []const u8, authorization: ?[]const u8 };
+pub const Request = struct { consumed: usize, route: Route, argument: []const u8, secondary: []const u8, query: []const u8, keep_alive: bool, body: []const u8, authorization: ?[]const u8 };
 pub const Parse = union(enum) { more, bad: u16, request: Request };
 
 pub fn parse(bytes: []const u8) Parse {
@@ -93,6 +104,7 @@ pub fn parse(bytes: []const u8) Parse {
         .consumed = head_len + body_len,
         .route = matched.route,
         .argument = matched.argument,
+        .secondary = matched.secondary,
         .query = if (path_end < target.len) target[path_end + 1 ..] else "",
         .keep_alive = !close,
         .body = bytes[head_len..][0..body_len],
@@ -100,7 +112,7 @@ pub fn parse(bytes: []const u8) Parse {
     } };
 }
 
-const Match = struct { route: Route, argument: []const u8 = "" };
+const Match = struct { route: Route, argument: []const u8 = "", secondary: []const u8 = "" };
 
 fn route(method: []const u8, path: []const u8) Match {
     if (std.mem.eql(u8, method, "GET")) {
@@ -108,15 +120,40 @@ fn route(method: []const u8, path: []const u8) Match {
         if (std.mem.eql(u8, path, "/api/user")) return .{ .route = .current };
         if (std.mem.eql(u8, path, "/api/articles")) return .{ .route = .articles };
         if (std.mem.eql(u8, path, "/api/articles/feed")) return .{ .route = .feed };
-        const article_prefix = "/api/articles/";
-        if (std.mem.startsWith(u8, path, article_prefix)) {
-            const slug = path[article_prefix.len..];
-            if (slug.len != 0 and std.mem.indexOfScalar(u8, slug, '/') == null) return .{ .route = .article, .argument = slug };
-        }
     } else if (std.mem.eql(u8, method, "POST")) {
         if (std.mem.eql(u8, path, "/api/users")) return .{ .route = .register };
         if (std.mem.eql(u8, path, "/api/users/login")) return .{ .route = .login };
+        if (std.mem.eql(u8, path, "/api/articles")) return .{ .route = .create_article };
     } else if (std.mem.eql(u8, method, "PUT") and std.mem.eql(u8, path, "/api/user")) return .{ .route = .update };
+    const article_prefix = "/api/articles/";
+    if (std.mem.startsWith(u8, path, article_prefix)) {
+        const tail = path[article_prefix.len..];
+        const end = std.mem.indexOfScalar(u8, tail, '/') orelse tail.len;
+        if (end == 0) return .{ .route = .unknown };
+        const slug = tail[0..end];
+        const suffix = tail[end..];
+        const matched: Route = if (suffix.len == 0) blk: {
+            if (std.mem.eql(u8, method, "GET")) break :blk .article;
+            if (std.mem.eql(u8, method, "PUT")) break :blk .update_article;
+            if (std.mem.eql(u8, method, "DELETE")) break :blk .delete_article;
+            break :blk .unknown;
+        } else if (std.mem.eql(u8, suffix, "/favorite")) blk: {
+            if (std.mem.eql(u8, method, "POST")) break :blk .favorite;
+            if (std.mem.eql(u8, method, "DELETE")) break :blk .unfavorite;
+            break :blk .unknown;
+        } else if (std.mem.eql(u8, suffix, "/comments")) blk: {
+            if (std.mem.eql(u8, method, "GET")) break :blk .comments;
+            if (std.mem.eql(u8, method, "POST")) break :blk .create_comment;
+            break :blk .unknown;
+        } else .unknown;
+        if (matched != .unknown) return .{ .route = matched, .argument = slug };
+        const comment_prefix = "/comments/";
+        if (std.mem.eql(u8, method, "DELETE") and std.mem.startsWith(u8, suffix, comment_prefix)) {
+            const id = suffix[comment_prefix.len..];
+            if (id.len != 0 and std.mem.indexOfScalar(u8, id, '/') == null) return .{ .route = .delete_comment, .argument = slug, .secondary = id };
+        }
+        return .{ .route = .unknown };
+    }
     const prefix = "/api/profiles/";
     if (std.mem.startsWith(u8, path, prefix)) {
         const tail = path[prefix.len..];
@@ -176,6 +213,15 @@ test "article routing reserves feed and preserves raw query and encoded slug" {
     const article = parse("GET /api/articles/a%2Fb?limit=0 HTTP/1.1\r\nHost: x\r\n\r\n").request;
     try std.testing.expectEqual(Route.article, article.route);
     try std.testing.expectEqualStrings("a%2Fb", article.argument);
-    try std.testing.expectEqual(Route.unknown, route("POST", "/api/articles").route);
-    try std.testing.expectEqual(Route.unknown, route("GET", "/api/articles/a/comments").route);
+    try std.testing.expectEqual(Route.create_article, route("POST", "/api/articles").route);
+    try std.testing.expectEqual(Route.comments, route("GET", "/api/articles/a/comments").route);
+}
+
+test "write routes preserve encoded slug and keep comment IDs separate" {
+    const matched = route("DELETE", "/api/articles/a%2Fb/comments/%31");
+    try std.testing.expectEqual(Route.delete_comment, matched.route);
+    try std.testing.expectEqualStrings("a%2Fb", matched.argument);
+    try std.testing.expectEqualStrings("%31", matched.secondary);
+    try std.testing.expectEqual(Route.unknown, route("DELETE", "/api/articles/a/comments/1/more").route);
+    try std.testing.expectEqual(Route.unknown, route("GET", "/api/articles/a/favorite").route);
 }

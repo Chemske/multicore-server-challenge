@@ -72,15 +72,15 @@ with Server('zig', submission / 'zig-out/bin/conduit') as zig, Server('go', refe
     assert golden_run.returncode == 0, golden_run.stdout
     auth_steps = [line for line in steps if re.match(r'^PASS (users\.|user\.)', line)]
     profile_steps = [line for line in steps if line.startswith('PASS profile.')]
-    assert len(auth_steps) == 50 and len(profile_steps) == 16
+    assert len(auth_steps) == 50 and len(profile_steps) >= 16
     assert not any(line.startswith('FAIL tags.') for line in run.stdout.splitlines())
-    passed('unchanged upstream: 50 users/auth steps and all 16 reachable profile steps passed')
+    passed(f'unchanged upstream: 50 users/auth and all {len(profile_steps)} reached profile steps passed')
     normalized = {step['step']: step for step in golden}
     profiles = [step for step in transcript if step['step'].startswith('profile.')]
-    assert len(profiles) == 16
+    assert len(profiles) == len(profile_steps)
     assert all(step == normalized[step['step']] for step in profiles)
-    passed('all 16 normalized upstream profile responses match the unchanged Go reference')
-    print('Zig full upstream run (later routes remain unimplemented): ' + summary, flush=True)
+    passed(f'all {len(profiles)} normalized upstream profile responses match the unchanged Go reference')
+    print('Zig full upstream run: ' + summary, flush=True)
     print('Unchanged Go reference: ' + golden_summary, flush=True)
 
     # Apply the same ordinary operation trace to independent databases.
@@ -253,4 +253,4 @@ with Server('zig', submission / 'zig-out/bin/conduit') as zig, Server('go', refe
                 'reference_divergence': 'An empty Authorization header returns 401 as SPEC requires; Go treats it as absent.',
                 'scope': 'native Mac correctness; no linked Linux or capacity claim'}
     (results / 'results.json').write_text(json.dumps(evidence, indent=2) + '\n')
-    print(f'PASS: {len(checks)} profile scenarios; 50 upstream auth and 16 reachable profile steps passed', flush=True)
+    print(f'PASS: {len(checks)} profile scenarios; 50 upstream auth and {len(profile_steps)} reached profile steps passed', flush=True)

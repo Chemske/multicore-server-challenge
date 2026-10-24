@@ -14,6 +14,7 @@ const fields =
 ;
 const from = " FROM articles a JOIN users u ON u.id = a.author_id ";
 const select = fields ++ from;
+pub const by_id = fields ++ ", a.body" ++ from ++ " WHERE a.id = $2";
 pub const Family = enum { all, tag, author, favorited, feed, single };
 pub const Read = struct {
     family: Family,

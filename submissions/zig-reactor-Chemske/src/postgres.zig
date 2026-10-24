@@ -3,6 +3,7 @@ const c = std.c;
 const http = @import("http.zig");
 const profiles = @import("profiles.zig");
 const articles = @import("articles.zig");
+const operations = @import("operations.zig");
 
 // Minimal declarations from PostgreSQL 18's public libpq-fe.h ABI.
 pub const Conn = opaque {};
@@ -12,6 +13,7 @@ extern "c" fn PQconnectPoll(*Conn) c_int;
 pub extern "c" fn PQsocket(*const Conn) c_int;
 extern "c" fn PQsetnonblocking(*Conn, c_int) c_int;
 pub extern "c" fn PQfinish(*Conn) void;
+pub extern "c" fn PQtransactionStatus(*const Conn) c_int;
 extern "c" fn PQsendQueryParams(*Conn, [*:0]const u8, c_int, ?[*]const u32, ?[*]const ?[*:0]const u8, ?[*]const c_int, ?[*]const c_int, c_int) c_int;
 pub extern "c" fn PQflush(*Conn) c_int;
 pub extern "c" fn PQconsumeInput(*Conn) c_int;
@@ -64,16 +66,20 @@ pub fn query(conn: *Conn, route: http.Route, params: []const ?[:0]const u8, read
         .profile => profiles.get_sql,
         .follow => profiles.follow_sql,
         .unfollow => profiles.unfollow_sql,
-        .articles, .feed, .article, .unknown => unreachable,
+        else => unreachable,
     };
+    try send(conn, statement, actual);
+}
+
+pub fn send(conn: *Conn, statement: [:0]const u8, params: []const ?[:0]const u8) !void {
     var values: [6]?[*:0]const u8 = @splat(null);
-    for (actual, 0..) |param, i| values[i] = if (param) |p| p.ptr else null;
+    for (params, 0..) |param, i| values[i] = if (param) |p| p.ptr else null;
     // libpq copies the parameter bytes before this call returns.
-    if (PQsendQueryParams(conn, statement.ptr, @intCast(actual.len), null, &values, null, null, 0) != 1) return error.DatabaseQuery;
+    if (PQsendQueryParams(conn, statement.ptr, @intCast(params.len), null, &values, null, null, 0) != 1) return error.DatabaseQuery;
 }
 
 pub fn status(result: *Result) u16 {
-    if (PQresultStatus(result) == 2) return 200;
+    if (PQresultStatus(result) == 2 or PQresultStatus(result) == 1) return 200;
     const code = PQresultErrorField(result, 'C') orelse return 503;
     return if (std.mem.eql(u8, std.mem.span(code), "23505")) 422 else 503;
 }
@@ -205,4 +211,73 @@ pub fn articleCount(result: *Result) !i64 {
     const count = std.fmt.parseInt(i64, try required(result, 0, 0), 10) catch return error.DatabaseResult;
     if (count < 0 or count > 1000) return error.DatabaseResult;
     return count;
+}
+
+fn identifier(result: *Result, allocator: std.mem.Allocator) !?[:0]const u8 {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != 1 or PQntuples(result) > 1) return error.DatabaseResult;
+    if (PQntuples(result) == 0) return null;
+    const value = try required(result, 0, 0);
+    const number = std.fmt.parseInt(i64, value, 10) catch return error.DatabaseResult;
+    if (number <= 0) return error.DatabaseResult;
+    return try allocator.dupeSentinel(u8, value, 0);
+}
+
+fn commentRows(result: *Result, allocator: std.mem.Allocator, single: bool) ![]operations.Comment {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != 8) return error.DatabaseResult;
+    const count: usize = @intCast(PQntuples(result));
+    if (count > @as(usize, if (single) 1 else 100)) return error.DatabaseResult;
+    const comments = try allocator.alloc(operations.Comment, count);
+    var total: usize = 0;
+    for (comments, 0..) |*comment, index| {
+        const row: c_int = @intCast(index);
+        for (0..8) |column| {
+            total += @intCast(PQgetlength(result, row, @intCast(column)));
+            if (total > 4 * 1024 * 1024) return error.ResponseTooLarge;
+        }
+        const id = std.fmt.parseInt(i64, try required(result, row, 0), 10) catch return error.DatabaseResult;
+        if (id <= 0) return error.DatabaseResult;
+        comment.* = .{
+            .id = id,
+            .body = try textCell(result, row, 1, allocator),
+            .createdAt = try textCell(result, row, 2, allocator),
+            .updatedAt = try textCell(result, row, 3, allocator),
+            .author = .{
+                .username = try textCell(result, row, 4, allocator),
+                .bio = try nullableCell(result, row, 5, allocator),
+                .image = try nullableCell(result, row, 6, allocator),
+                .following = try boolean(result, row, 7),
+            },
+        };
+    }
+    return comments;
+}
+
+pub fn operationResult(result: *Result, operation: *operations.Operation, allocator: std.mem.Allocator) !u16 {
+    switch (operation.stage) {
+        .begin, .insert_tags, .link_tags, .commit, .rollback => {
+            if (PQresultStatus(result) != 1) return error.DatabaseResult;
+        },
+        .insert_article, .lookup => operation.id = (try identifier(result, allocator)) orelse return 404,
+        .mutate => switch (operation.kind) {
+            .favorite, .unfavorite => operation.id = (try identifier(result, allocator)) orelse return 404,
+            .create_comment => {
+                operation.comments = try commentRows(result, allocator, true);
+                if (operation.comments.len != 1) return error.DatabaseResult;
+            },
+            .update_article, .delete_article, .delete_comment => {
+                if (PQresultStatus(result) != 2 or PQnfields(result) != 2 or PQntuples(result) != 1) return error.DatabaseResult;
+                const code = std.fmt.parseInt(u16, try required(result, 0, 0), 10) catch return error.DatabaseResult;
+                if (code != 200) return if (code == 403 or code == 404) code else error.DatabaseResult;
+                const id = try required(result, 0, 1);
+                operation.id = try allocator.dupeSentinel(u8, id, 0);
+            },
+            else => unreachable,
+        },
+        .article_row => {
+            operation.article = try articlePage(result, allocator, true);
+            if (operation.article.len == 0) return 404;
+        },
+        .comment_rows => operation.comments = try commentRows(result, allocator, false),
+    }
+    return 200;
 }
