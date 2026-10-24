@@ -2,11 +2,11 @@
 
 Front: direct
 
-**Status: research and proposed architecture. No server has been implemented yet.**
+**Status: milestone 1 — native database setup and a working tags endpoint. Not submission-ready.**
 
 I am building a Conduit implementation for the Multicore Server Challenge, targeting the highest sustainable official score. My development environment is native macOS on Apple Silicon. I keep the toolchain, database, caches and generated files within one project workspace wherever the tools allow it.
 
-My design starts with a small event-driven server in Zig, the official PostgreSQL client library in non-blocking mode, and a scheduler that combines compatible database work already waiting to run. The implementation will speak HTTP/1.1 directly, without Nginx.
+The first implementation is a small event-driven Zig server using the official PostgreSQL client library in non-blocking mode. It serves GET /api/tags directly over HTTP/1.1. Query batching and the remaining endpoints are planned, not implemented.
 
 The central idea is simple: **make each request create less work for the whole machine, especially PostgreSQL.** More threads are not automatically more useful when the application and database share eight CPUs.
 
@@ -16,12 +16,39 @@ The central idea is simple: **make each request create less work for the whole m
 |---|---|
 | Application | Zig 0.17.0 |
 | Networking | Small Zig reactor; kqueue on macOS, epoll on Linux |
-| HTTP parsing | Pinned picohttpparser source, compiled into the application |
-| PostgreSQL | PostgreSQL 18; libpq asynchronous API and pipeline mode |
-| Authentication | Zig standard-library cryptography; HS256 and bcrypt cost 10 |
+| HTTP parsing | Vendored picohttpparser at 465a7ff09fbd3432fe56c673451f5460154d1f07 |
+| PostgreSQL | PostgreSQL/libpq 18.6; asynchronous single-query path implemented, pipeline mode planned |
+| Authentication | HS256 and bcrypt cost 10 planned; no auth endpoints implemented yet |
 | Deployment | Direct HTTP; official Ubuntu 24.04 x86_64 runtime contract |
 
-The application and scheduling logic will be Zig. libpq and picohttpparser are C libraries, not separate services or development applications. Their exact source versions, hashes, licences and build requirements must be locked before integration. No dependency is selected on an unverified performance claim.
+The application and scheduling logic are Zig. libpq and picohttpparser are C libraries, not separate services or development applications. Source pins and hashes are documented in [vendor/README.md](vendor/README.md). PostgreSQL is built locally from its official checked source archive.
+
+## Run the first milestone on macOS
+
+From this submission directory, in Bash or Zsh:
+
+```sh
+source dev/env.sh
+bash dev/setup-postgres.sh
+bash dev/database.sh start
+bash dev/database.sh seed
+bash build.sh
+bash start.sh
+```
+
+In another terminal, GET http://127.0.0.1:3000/api/tags. The environment defaults to the disposable interactive database conduit_local on authenticated loopback port 55432. The conduit_dev seed remains a template and must not have a server connected while tests copy it.
+
+Stop the server with Ctrl+C, then stop the dedicated database with `bash dev/database.sh stop`. Nothing is registered to start automatically with macOS.
+
+For the focused checks:
+
+```sh
+source dev/env.sh
+zig build test -Dpg-root="$PGROOT"
+python3 tests/milestone1.py
+```
+
+The Python check creates and removes a private database copy, launches its own server and exercises concurrent requests, keep-alive, framing, fresh database reads and failures.
 
 ## Design notes
 
@@ -32,9 +59,11 @@ The application and scheduling logic will be Zig. libpq and picohttpparser are C
 
 ## Current validation
 
-The existing challenge tools have been built, and the existing load-generator tests passed during environment preparation. Zig also compiled and executed a limited selection of existing standard-library tests. These checks validate parts of the development environment; they do not validate this proposed server.
+The unmodified Go example passed all 197 conformance steps against this native PostgreSQL 18.6 environment. That validates the environment; it is not a conformance pass for this Zig server.
 
-No implementation benchmarks, conformance pass, Linux execution or official score are claimed here. Installation, build and start scripts will be added during implementation. This folder is not ready for submission.
+The Zig milestone passed protocol unit checks and 11 integration scenarios, including 64 requests across 16 simultaneous keep-alive clients. The Linux source path also passed an object-only cross-compilation check; no linked Linux server has been run. There are no capacity benchmarks or official scores.
+
+Current limits are deliberate: one database connection, 256 client slots, bounded request/response buffers, a 70-second idle timeout and request/query deadlines. Only GET /api/tags is implemented. Request bodies are rejected and connections closed. A query error is drained and the connection can be reused; a lost database connection puts the service into 503 mode until restart. Authentication, writes, reconnects, batching and the Ubuntu install script remain future work.
 
 ## Working principles
 

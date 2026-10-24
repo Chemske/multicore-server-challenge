@@ -19,15 +19,23 @@ These are local workspace conventions. The eventual submission must build from i
 
 ## Existing tools
 
-Zig 0.17.0 and VS Code were already installed. Preparation added project-local Go 1.27.3 and GitHub CLI 2.103.2 from official, SHA-256-checked distributions, plus the official Zig VS Code extension 0.7.0. No PostgreSQL installation has been made yet.
+Zig 0.17.0 and VS Code were already installed. Preparation added project-local Go 1.27.3 and GitHub CLI 2.103.2 from official, SHA-256-checked distributions, plus the official Zig VS Code extension 0.7.0. Milestone 1 added PostgreSQL/libpq 18.6 under work/tools, built from the official source archive with SHA-256 555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f.
+
+The VS Code extension automatically downloaded ZLS 0.17.0 when source files appeared. Its binary, README and licence were moved to work/tools/zls-0.17.0, and the workspace now uses that path and a project-local ZLS cache. This is an additional editor helper, not a separately installed application.
 
 The VS Code workspace directs new integrated terminals to local GOCACHE, GOMODCACHE, GOPATH, ZIG_GLOBAL_CACHE_DIR, ZIG_LOCAL_CACHE_DIR and TMPDIR paths. PSQL_HISTORY is local too. GOTOOLCHAIN=local avoids silently downloading another Go compiler. Existing terminals and commands launched elsewhere do not automatically inherit this environment. Editor-managed tools need the same cache-location check before activation.
 
-## Planned PostgreSQL setup
+## PostgreSQL setup
+
+Milestone 1 uses the source-built PostgreSQL 18.6 prefix at work/tools/postgresql-18.6 and data at work/runtime/postgres-18. It requires no sudo or package manager. The local build omits ICU, readline and zlib; it uses UTF-8 with C locale. The reference conformance run passed with these choices. This setup is for local correctness work, not representative benchmark tuning.
+
+The cluster listens only on 127.0.0.1:55432 and requires SCRAM authentication. Unix-domain sockets are disabled because the workspace path exceeds macOS's socket-path length limit. No socket or database files are redirected to an external location. The local development administrator credentials in dev/env.sh are for this disposable cluster only.
+
+conduit_dev is the checked reference seed. conduit_local is a separate copy used by the interactive server. Focused tests create and drop their own additional copies. PostgreSQL refuses to copy a template with active sessions; keeping the interactive server away from conduit_dev prevents that conflict.
 
 Use one pinned PostgreSQL 18 distribution with both server tools and libpq, installed/extracted under work/tools if it is relocatable and meets the test requirements. Keep data, sockets and logs under work/runtime. Start and stop it explicitly with pg_ctl, bind locally on a dedicated port, and do not register an automatic service.
 
-A local source build is a candidate because the Mac already has the basic compiler, SDK, make, flex, bison and Perl tools. The exact patch release, checksums, optional dependencies and collation are still to be verified. I will not install a chain of extra packages merely to rescue an unsuitable distribution. The Linux submission build must also pin its client dependency and build from source where required by the challenge.
+The native source build succeeded using existing compiler/SDK, make, flex, bison and Perl tools. No extra build packages were installed. The eventual Linux submission installer must also pin the toolchain/client requirements and meet the challenge's source-build rules.
 
 Use development data first. Full-seed tests need extra space for template copies, generated seed files, WAL and logs. The reported database size is not the peak disk requirement. Avoid multiple full copies by default and record disk use around longer tests.
 
@@ -49,7 +57,7 @@ bash seed/make-seed.sh
 TEMPLATE=conduit_seed bash test/run.sh submissions/zig-reactor-Chemske
 ```
 
-These are a runbook, not commands executed for this server. Seed creation replaces the named seed database, so it belongs in the dedicated project cluster. Test/run creates and removes a temporary database. Load tests need separate disposable copies because they mutate data. Local development-seed load runs use 10,000 seeded articles rather than the full-data default.
+The full conformance commands remain future work for this Zig server, whose only endpoint is tags. Seed creation replaces the named seed database, so it belongs in the dedicated project cluster. The dev helper preserves an existing seed instead of replacing it. Test/run creates and removes a temporary database. Load tests need separate disposable copies because they mutate data. Local development-seed load runs use 10,000 seeded articles rather than the full-data default.
 
 The Mac's six cores and 8 GiB RAM cannot reproduce the official Linux target. Keep local load within host limits, monitor generator saturation and memory pressure, and never label local capacity as an official score. Linux CI is a required compatibility check; the organiser's benchmark determines the ranking. No remote server rental is part of this plan.
 
@@ -69,6 +77,10 @@ Earlier preparation also used default cache locations outside this workspace:
 I will not delete entire shared caches without confirming their contents. The pre-existing Zig installation, VS Code and GitHub credentials are not disposable challenge files. macOS and the editors can also retain normal metadata and history; a contained workspace is not a promise of zero operating-system traces.
 
 Cleanup order: stop only the project server and database cluster; preserve or push useful source and results; remove project-generated work; optionally remove the added extension and reviewed external cache entries. Never remove a live database directory before stopping its server. Keep this inventory current as setup changes.
+
+Milestone 1 also uses work/build for PostgreSQL source/object files, work/downloads for its checked archive, work/logs for build/test/database logs, and work/tools/reference-go for the built reference executable. These are all removable generated assets after the project processes stop. A first Zsh path-resolution error briefly created a work directory in Documents; its generated contents were moved to work/tmp/env-initial-attempt and the external directory no longer exists. The helper was corrected and verified in both Bash and Zsh.
+
+To keep newly opened terminals consistent, source dev/env.sh before building or running tests. It sets the task-specific development paths and defaults; a manual HOST or PORT override belongs on the server command after sourcing. CHALLENGE_HOST and CHALLENGE_PORT can set helper defaults without colliding with Zsh's built-in HOST variable.
 
 ## Repository policy
 
