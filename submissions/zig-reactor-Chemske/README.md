@@ -26,6 +26,7 @@ The application and scheduling logic will be Zig. libpq and picohttpparser are C
 ## Design notes
 
 - [Research and selection](docs/RESEARCH.md): evidence, alternatives, uncertainties and the case for this architecture.
+- [Competitor source review](docs/COMPETITOR_REVIEW.md): leading implementations, reproduced parser observations and specific improvement opportunities.
 - [Architecture](docs/ARCHITECTURE.md): ownership, scheduling, batching and correctness boundaries.
 - [Development and cleanup](docs/DEVELOPMENT.md): native Mac setup policy, milestone gates and removal inventory.
 

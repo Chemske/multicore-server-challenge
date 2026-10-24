@@ -48,7 +48,7 @@ Bcrypt uses cost 10 and fresh salts. Verification runs on every login. Its queue
 
 ## Errors, overload and recovery
 
-Every queue, batch and in-flight set has a limit. Overload is visible and measured; I will not call a run successful by omitting failed requests. PostgreSQL failures are drained to a known protocol boundary or the connection is replaced. Reconnection rebuilds prepared statements and session settings. Request arguments and credentials never enter routine logs.
+Every queue, batch and in-flight set has limits on count and retained bytes, with request age/deadlines considered before dispatch. Overload is visible and measured; I will not call a run successful by omitting failed requests. PostgreSQL failures are drained to a known protocol boundary or the connection is replaced. Reconnection rebuilds prepared statements and session settings. Request arguments and credentials never enter routine logs.
 
 HTTP error mapping follows the conformance suite. Transaction failures must not leak aborted state into another request. A single lost backend should not corrupt other connection owners or misroute completions.
 
