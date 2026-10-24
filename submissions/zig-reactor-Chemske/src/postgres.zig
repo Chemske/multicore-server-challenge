@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = std.c;
+const http = @import("http.zig");
 
 // Minimal declarations from PostgreSQL 18's public libpq-fe.h ABI.
 pub const Conn = opaque {};
@@ -21,6 +22,7 @@ extern "c" fn PQnfields(*const Result) c_int;
 extern "c" fn PQgetisnull(*const Result, c_int, c_int) c_int;
 extern "c" fn PQgetvalue(*const Result, c_int, c_int) [*]const u8;
 extern "c" fn PQgetlength(*const Result, c_int, c_int) c_int;
+extern "c" fn PQresultErrorField(*const Result, c_int) ?[*:0]const u8;
 
 pub fn connect(url: [*:0]const u8, io: std.Io) !*Conn {
     const conn = PQconnectStart(url) orelse return error.DatabaseConnect;
@@ -41,8 +43,55 @@ pub fn connect(url: [*:0]const u8, io: std.Io) !*Conn {
     return error.DatabaseConnectTimeout;
 }
 
-pub fn queryTags(conn: *Conn) !void {
-    if (PQsendQueryParams(conn, "SELECT name FROM tags ORDER BY name", 0, null, null, null, null, 0) != 1) return error.DatabaseQuery;
+pub fn query(conn: *Conn, route: http.Route, params: []const ?[:0]const u8) !void {
+    const statement: [*:0]const u8 = switch (route) {
+        .tags => "SELECT name FROM tags ORDER BY name",
+        .register => "INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email, bio, image",
+        .login => "SELECT id, username, email, bio, image, password_hash FROM users WHERE email = $1",
+        .current => "SELECT id, username, email, bio, image FROM users WHERE id = $1",
+        .update => "UPDATE users SET email = COALESCE($2, email), username = COALESCE($3, username), password_hash = COALESCE($4, password_hash), bio = COALESCE($5, bio), image = COALESCE($6, image) WHERE id = $1 RETURNING id, username, email, bio, image",
+        .unknown => unreachable,
+    };
+    var values: [6]?[*:0]const u8 = @splat(null);
+    for (params, 0..) |param, i| values[i] = if (param) |p| p.ptr else null;
+    // libpq copies the parameter bytes before this call returns.
+    if (PQsendQueryParams(conn, statement, @intCast(params.len), null, &values, null, null, 0) != 1) return error.DatabaseQuery;
+}
+
+pub fn status(result: *Result) u16 {
+    if (PQresultStatus(result) == 2) return 200;
+    const code = PQresultErrorField(result, 'C') orelse return 503;
+    return if (std.mem.eql(u8, std.mem.span(code), "23505")) 422 else 503;
+}
+
+pub const User = struct {
+    id: []const u8,
+    username: []const u8,
+    email: []const u8,
+    bio: ?[]const u8,
+    image: ?[]const u8,
+    hash: ?[]const u8,
+};
+
+fn field(result: *Result, column: c_int, allocator: std.mem.Allocator) !?[]const u8 {
+    if (PQgetisnull(result, 0, column) != 0) return null;
+    const len: usize = @intCast(PQgetlength(result, 0, column));
+    if (len > 1024 * 1024) return error.ResponseTooLarge;
+    return try allocator.dupe(u8, PQgetvalue(result, 0, column)[0..len]);
+}
+
+pub fn user(result: *Result, allocator: std.mem.Allocator, login: bool) !?User {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != @as(c_int, if (login) 6 else 5)) return error.DatabaseResult;
+    if (PQntuples(result) == 0) return null;
+    if (PQntuples(result) != 1) return error.DatabaseResult;
+    return .{
+        .id = (try field(result, 0, allocator)) orelse return error.DatabaseResult,
+        .username = (try field(result, 1, allocator)) orelse return error.DatabaseResult,
+        .email = (try field(result, 2, allocator)) orelse return error.DatabaseResult,
+        .bio = try field(result, 3, allocator),
+        .image = try field(result, 4, allocator),
+        .hash = if (login) try field(result, 5, allocator) else null,
+    };
 }
 
 pub fn tagsJson(result: *Result, allocator: std.mem.Allocator) ![]u8 {

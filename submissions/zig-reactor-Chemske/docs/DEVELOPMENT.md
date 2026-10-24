@@ -57,7 +57,7 @@ bash seed/make-seed.sh
 TEMPLATE=conduit_seed bash test/run.sh submissions/zig-reactor-Chemske
 ```
 
-The full conformance commands remain future work for this Zig server, whose only endpoint is tags. Seed creation replaces the named seed database, so it belongs in the dedicated project cluster. The dev helper preserves an existing seed instead of replacing it. Test/run creates and removes a temporary database. Load tests need separate disposable copies because they mutate data. Local development-seed load runs use 10,000 seeded articles rather than the full-data default.
+A full conformance pass remains future work. The Zig server currently implements tags and the four users/auth routes; the milestone 2 test runs the unchanged suite and records the expected later failures. Seed creation replaces the named seed database, so it belongs in the dedicated project cluster. The dev helper preserves an existing seed instead of replacing it. Test/run creates and removes a temporary database. Load tests need separate disposable copies because they mutate data. Local development-seed load runs use 10,000 seeded articles rather than the full-data default.
 
 The Mac's six cores and 8 GiB RAM cannot reproduce the official Linux target. Keep local load within host limits, monitor generator saturation and memory pressure, and never label local capacity as an official score. Linux CI is a required compatibility check; the organiser's benchmark determines the ranking. No remote server rental is part of this plan.
 
@@ -81,6 +81,8 @@ Cleanup order: stop only the project server and database cluster; preserve or pu
 Milestone 1 also uses work/build for PostgreSQL source/object files, work/downloads for its checked archive, work/logs for build/test/database logs, and work/tools/reference-go for the built reference executable. These are all removable generated assets after the project processes stop. A first Zsh path-resolution error briefly created a work directory in Documents; its generated contents were moved to work/tmp/env-initial-attempt and the external directory no longer exists. The helper was corrected and verified in both Bash and Zsh.
 
 To keep newly opened terminals consistent, source dev/env.sh before building or running tests. It sets the task-specific development paths and defaults; a manual HOST or PORT override belongs on the server command after sourcing. CHALLENGE_HOST and CHALLENGE_PORT can set helper defaults without colliding with Zsh's built-in HOST variable.
+
+Milestone 2 adds no installed tools. Its test builds the existing upstream Go reference and conformance executable into work/tools and writes logs, normalized transcripts and JSON evidence to work/results/milestone2. Disposable test databases are removed even on an assertion failure. The interactive server still uses only conduit_local.
 
 ## Repository policy
 
