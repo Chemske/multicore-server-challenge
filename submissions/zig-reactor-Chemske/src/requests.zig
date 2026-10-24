@@ -3,7 +3,8 @@ const http = @import("http.zig");
 const auth = @import("auth.zig");
 const pg = @import("postgres.zig");
 const bcrypt = @import("bcrypt_pool.zig");
-const profiles = @import("profiles.zig");
+const url = @import("url.zig");
+const articles = @import("articles.zig");
 
 pub const Recipient = struct { index: usize, generation: u32 };
 pub const Task = struct {
@@ -18,6 +19,7 @@ pub const Task = struct {
     row: ?pg.User = null,
     status: u16 = 503,
     body: ?[]const u8 = null,
+    read: ?articles.Read = null,
 
     pub fn create(allocator: std.mem.Allocator, request: http.Request, recipient: Recipient, secret: []const u8, now: i64) !*Task {
         const self = try allocator.create(Task);
@@ -31,8 +33,32 @@ pub const Task = struct {
             self.params[0] = try std.fmt.allocPrintSentinel(a, "{d}", .{identity.id}, 0);
         } else if (policy == .optional) self.params[0] = "0";
         if (request.route.isProfile()) {
-            self.params[1] = try profiles.username(a, request.argument);
+            self.params[1] = try url.pathSegment(a, request.argument);
             self.param_count = 2;
+            return self;
+        }
+        if (request.route == .article) {
+            self.params[1] = try url.pathSegment(a, request.argument);
+            self.param_count = 2;
+            self.read = .{ .family = .single };
+            return self;
+        }
+        if (request.route == .articles or request.route == .feed) {
+            const options = try url.query(a, request.query, request.route == .articles);
+            const family: articles.Family = if (request.route == .feed) .feed else switch (options.filter) {
+                .all => .all,
+                .tag => .tag,
+                .author => .author,
+                .favorited => .favorited,
+            };
+            self.read = .{ .family = family };
+            self.params[1] = try std.fmt.allocPrintSentinel(a, "{d}", .{options.limit}, 0);
+            self.params[2] = try std.fmt.allocPrintSentinel(a, "{d}", .{options.offset}, 0);
+            self.param_count = 3;
+            if (request.route == .articles and options.value != null) {
+                self.params[3] = options.value;
+                self.param_count = 4;
+            }
             return self;
         }
         if (request.route == .tags) return self;

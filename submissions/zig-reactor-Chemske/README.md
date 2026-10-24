@@ -2,11 +2,11 @@
 
 Front: direct
 
-**Status: milestone 3 — tags, users/auth and profiles/follows. Not submission-ready.**
+**Status: milestone 4 — article/feed reads, tags, users/auth and profiles/follows. Not submission-ready.**
 
 I am building a Conduit implementation for the Multicore Server Challenge, targeting the highest sustainable official score. My development environment is native macOS on Apple Silicon. I keep the toolchain, database, caches and generated files within one project workspace wherever the tools allow it.
 
-The first implementation is a small event-driven Zig server using the official PostgreSQL client library in non-blocking mode. It serves tags, registration, login, current-user reads/updates and profiles/follows directly over HTTP/1.1. Query batching and the remaining endpoints are planned, not implemented.
+The first implementation is a small event-driven Zig server using the official PostgreSQL client library in non-blocking mode. It serves tags, registration, login, current-user reads/updates, profiles/follows, article lists, the personal feed and single-article reads directly over HTTP/1.1. Query batching and the remaining endpoints are planned, not implemented.
 
 The central idea is simple: **make each request create less work for the whole machine, especially PostgreSQL.** More threads are not automatically more useful when the application and database share eight CPUs.
 
@@ -48,9 +48,10 @@ zig build test -Dpg-root="$PGROOT"
 python3 tests/milestone1.py
 python3 tests/milestone2.py
 python3 tests/milestone3.py
+python3 tests/milestone4.py
 ```
 
-Each Python check creates and removes a private database copy and launches its own server. Milestone 1 covers tags/protocol regressions. Milestone 2 runs the unchanged upstream suite, requires all 50 users/auth steps to pass, and adds focused checks for commit visibility, token validation, bcrypt compatibility, concurrency and failure recovery. It also runs the unmodified Go reference briefly for bcrypt comparisons. Milestone 3 requires all 16 profile steps reached before article creation to pass and compares their normalized responses with a fresh full run of the unchanged Go reference. It adds targeted profile, viewer-isolation, path, contention, rollback and commit-failure checks. All test binaries, logs and transcripts stay under work/.
+Each Python check creates and removes a private database copy and launches its own server. Milestone 1 covers tags/protocol regressions. Milestone 2 runs the unchanged upstream suite, requires all 50 users/auth steps to pass, and adds focused checks for commit visibility, token validation, bcrypt compatibility, concurrency and failure recovery. It also runs the unmodified Go reference briefly for bcrypt comparisons. Milestone 3 requires all 16 profile steps reached before the missing comment-create route to pass and compares their normalized responses with a fresh full run of the unchanged Go reference. It adds targeted profile, viewer-isolation, path, contention, rollback and commit-failure checks. Milestone 4 compares all 119 upstream steps before favourite writes, including 51 article/feed read steps, and exercises extra pagination, serialization, concurrency and two-stage query failures. Shared Python helpers manage disposable servers and reference transcripts. All test binaries, logs and transcripts stay under work/.
 
 ## Design notes
 
@@ -63,7 +64,9 @@ Each Python check creates and removes a private database copy and launches its o
 
 The unmodified Go example passed all 197 conformance steps against this native PostgreSQL 18.6 environment. That validates the environment; it is not a conformance pass for this Zig server.
 
-The Zig implementation passes all 50 users/auth steps and all 16 profile steps reached before article creation in the unchanged upstream suite, eight unit checks, the 11 tags regression scenarios, 13 auth scenarios and 15 profile scenarios. The full upstream run currently reports 137 steps, 73 passed and 64 failed, then stops because later endpoints are unimplemented. Two additional profile calls in the later comments section are not reached yet. This is a checkpoint, not a full conformance pass.
+The Zig implementation passes all 119 unchanged upstream steps before favourite writes, including 50 users/auth, 16 profile and 51 article/feed steps. All 119 normalized responses match the unchanged Go reference. Eleven unit checks, 11 tags scenarios, 13 auth scenarios, 15 profile scenarios and 15 article/feed scenarios pass.
+
+The full Zig run currently reports 141 steps, 123 passed and 18 failed, then stops at the missing comment-create route. Remaining failures involve unimplemented writes/comments and later reads that depend on those writes. Two profile calls later in the script remain unreached. This is a checkpoint, not a full conformance pass.
 
 The auth checks include cross-verification with the unmodified Go reference for 72-byte, UTF-8 and embedded-NUL passwords. Zig 0.17 renders bcrypt as $2b$ and compares that version marker during verification; my adapter accepts the seed's corrected $2a$ format by normalizing only the marker before performing bcrypt. New passwords over 72 bytes are rejected; login verification follows Go's bcrypt truncation behaviour. Every login to an existing account still performs bcrypt verification, and changing the stored hash affects the next attempt.
 
@@ -73,9 +76,13 @@ Profile reads query the current relationship for the requesting viewer. Follow a
 
 All 16 reached normalized profile responses match the unchanged Go reference, which passes all 197 steps on a separate fresh clone. One deliberate difference outside that transcript follows the specification: a present empty Authorization header returns 401. The Go reference treats that header as absent. Dynamic usernames are decoded once as path segments, preserving literal plus signs and encoded separators.
 
+Article lists select page IDs in descending order before enrichment, then run a separate capped count, preserving the reference's statement order and snapshot behaviour. Counts stop at 1,000 without limiting which pages are accessible. Tag, author and favourited filters have the required precedence; unknown filters produce empty lists. Every request computes viewer-dependent flags from the database. Single articles include body; list objects omit it. Zig serializes JSON and decodes PostgreSQL text arrays; SQL formats UTC timestamps with three truncated fractional digits.
+
+The read tests cover empty pages that still need a count, duplicate and encoded query parameters, escaped tag names, timestamps before 1970, 96 concurrent reads, failed page/count queries and slow/disconnected readers. Valid large feed offsets return empty pages with the correct count; the reference's int32 arithmetic returns 500 for a tested valid offset. My feed query uses overflow-safe arithmetic. No speedup is claimed from these correctness checks.
+
 The Linux source path passes object-only cross-compilation; no linked Linux server has been run. There are no official scores.
 
-Current limits are deliberate: one database connection, 256 client slots, two bcrypt workers and at most 16 outstanding password jobs. Headers are limited to 16 KiB, bodies to 64 KiB and total buffered request data to 84 KiB. Chunked bodies are rejected and the connection closed. Idle clients have a 70-second timeout; active requests and database work have deadlines. A query error is drained and the connection can be reused; a lost database connection puts the service into 503 mode until restart. Articles/feed, comments, favourites, reconnects, batching and the Ubuntu install script remain future work.
+Current limits are deliberate: one database connection, 256 client slots, two bcrypt workers and at most 16 outstanding password jobs. Headers are limited to 16 KiB, bodies to 64 KiB and total buffered request data to 84 KiB. Chunked bodies are rejected and the connection closed. Idle clients have a 70-second timeout; active requests and database work have deadlines. A query error is drained and the connection can be reused; a lost database connection puts the service into 503 mode until restart. Article writes, comments, favourite writes, reconnects, batching and the Ubuntu install script remain future work. Article reads have a 4 MiB retained-field and serialized-response bound; larger results return 503.
 
 ## Working principles
 

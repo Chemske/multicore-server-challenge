@@ -15,12 +15,15 @@ pub const Route = enum {
     profile,
     follow,
     unfollow,
+    articles,
+    feed,
+    article,
     unknown,
 
     pub fn auth(self: Route) Auth {
         return switch (self) {
-            .current, .update, .follow, .unfollow => .required,
-            .profile => .optional,
+            .current, .update, .follow, .unfollow, .feed => .required,
+            .profile, .articles, .article => .optional,
             else => .none,
         };
     }
@@ -28,8 +31,12 @@ pub const Route = enum {
     pub fn isProfile(self: Route) bool {
         return self == .profile or self == .follow or self == .unfollow;
     }
+
+    pub fn isArticle(self: Route) bool {
+        return self == .articles or self == .feed or self == .article;
+    }
 };
-pub const Request = struct { consumed: usize, route: Route, argument: []const u8, keep_alive: bool, body: []const u8, authorization: ?[]const u8 };
+pub const Request = struct { consumed: usize, route: Route, argument: []const u8, query: []const u8, keep_alive: bool, body: []const u8, authorization: ?[]const u8 };
 pub const Parse = union(enum) { more, bad: u16, request: Request };
 
 pub fn parse(bytes: []const u8) Parse {
@@ -86,6 +93,7 @@ pub fn parse(bytes: []const u8) Parse {
         .consumed = head_len + body_len,
         .route = matched.route,
         .argument = matched.argument,
+        .query = if (path_end < target.len) target[path_end + 1 ..] else "",
         .keep_alive = !close,
         .body = bytes[head_len..][0..body_len],
         .authorization = authorization,
@@ -98,6 +106,13 @@ fn route(method: []const u8, path: []const u8) Match {
     if (std.mem.eql(u8, method, "GET")) {
         if (std.mem.eql(u8, path, "/api/tags")) return .{ .route = .tags };
         if (std.mem.eql(u8, path, "/api/user")) return .{ .route = .current };
+        if (std.mem.eql(u8, path, "/api/articles")) return .{ .route = .articles };
+        if (std.mem.eql(u8, path, "/api/articles/feed")) return .{ .route = .feed };
+        const article_prefix = "/api/articles/";
+        if (std.mem.startsWith(u8, path, article_prefix)) {
+            const slug = path[article_prefix.len..];
+            if (slug.len != 0 and std.mem.indexOfScalar(u8, slug, '/') == null) return .{ .route = .article, .argument = slug };
+        }
     } else if (std.mem.eql(u8, method, "POST")) {
         if (std.mem.eql(u8, path, "/api/users")) return .{ .route = .register };
         if (std.mem.eql(u8, path, "/api/users/login")) return .{ .route = .login };
@@ -152,4 +167,15 @@ test "profile routes match encoded segments before decoding and ignore query tex
     try std.testing.expectEqual(Route.unknown, route("POST", "/api/profiles//follow").route);
     try std.testing.expectEqual(Route.unknown, route("PUT", "/api/profiles/a/follow").route);
     try std.testing.expectEqual(Route.unknown, route("POST", "/api/profiles/a/follow/extra").route);
+}
+
+test "article routing reserves feed and preserves raw query and encoded slug" {
+    const feed = parse("GET /api/articles/feed?limit=2 HTTP/1.1\r\nHost: x\r\n\r\n").request;
+    try std.testing.expectEqual(Route.feed, feed.route);
+    try std.testing.expectEqualStrings("limit=2", feed.query);
+    const article = parse("GET /api/articles/a%2Fb?limit=0 HTTP/1.1\r\nHost: x\r\n\r\n").request;
+    try std.testing.expectEqual(Route.article, article.route);
+    try std.testing.expectEqualStrings("a%2Fb", article.argument);
+    try std.testing.expectEqual(Route.unknown, route("POST", "/api/articles").route);
+    try std.testing.expectEqual(Route.unknown, route("GET", "/api/articles/a/comments").route);
 }

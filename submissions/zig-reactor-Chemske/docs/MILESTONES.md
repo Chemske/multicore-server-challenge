@@ -54,7 +54,7 @@ The gate is the unchanged upstream users/auth and profiles sections, targeted vi
 Date: 2026-10-24. Profile reads, follow and unfollow are implemented. The request-lifetime module is now named requests.zig because it serves both users and profiles; SQL and username-path policy for profiles live in profiles.zig.
 
 - ReleaseSafe build and eight unit checks passed, including route boundaries and single-pass URL decoding.
-- All 50 users/auth and all 16 profile steps reached before article creation pass in the unchanged suite. The full Zig run reports 137 steps, 73 passed and 64 failed, then aborts at unimplemented article creation. Two profile calls in the later comments section remain unreached. This is not a full conformance pass.
+- All 50 users/auth and all 16 profile steps reached before comment creation pass in the unchanged suite. The full Zig run reports 137 steps, 73 passed and 64 failed, then aborts at unimplemented comment creation. Two profile calls in the later comments section remain unreached. This is not a full conformance pass.
 - A fresh full run of the unchanged Go reference passed 197/197 steps. All 16 reached normalized profile responses match it exactly.
 - Fifteen profile scenarios passed: upstream contract; normalized comparison; an independent Go/Zig follow/unfollow trace; encoded names; strict auth; committed row counts; self-follow; fresh reads after mutation/rename; fragmented/pipelined requests with changing identities; invalid paths; 64 contending requests; blocked follow and unfollow; deferred commit failure; SQL errors/reuse; client disconnect during a blocked write.
 - The deferred-failure test inserts a relation, rejects the transaction at its commit boundary, requires 503, verifies that the row rolled back, and confirms connection reuse. Its temporary trigger exists only in the disposable test clone. No official schema or seed file changes are involved.
@@ -64,6 +64,31 @@ The specification says a present invalid Authorization header is 401 even on opt
 
 No software installation or automatic service was added. Both test clones and all temporary servers are removed. Results live under work/results/milestone3, with selected evidence copied to outputs.
 
+## Milestone 4: execution plan
+
+Implement article lists, the personal feed and single-article reads. Lists select IDs in descending order before enriching the selected page. Tag, author and favourited filters use the first non-empty value in that priority order; duplicate query parameters use their first value. Pagination accepts digit-only integers, with limit 1–100 and a non-negative signed-64-bit offset.
+
+Keep the reference's page-then-capped-count execution order, with a separate statement snapshot for each stage. The HTTP request owns both results, and no partial response escapes if either stage fails. The same connection owner drains each query completely before starting the next stage. Empty pages still run the count. The feed keeps the reference's per-followed-author candidate selection but uses overflow-safe arithmetic for valid large offsets.
+
+Zig serializes the API objects, validates PostgreSQL text-array results and omits body only in list objects. UTC timestamp formatting is explicit in SQL and truncates to milliseconds. Viewer-dependent favourites/following are evaluated on every request. No response, count or relationship cache is added.
+
+The gate is the unchanged read-only portion of the upstream script before favourite writes, normalized comparison with the Go reference, targeted filter/pagination/serialization/freshness/failure checks and all earlier regressions. Later reads that depend on unimplemented writes remain visible failures. Source, test databases and caches stay in the existing workspace.
+
+## Milestone 4: results
+
+Date: 2026-10-24. Article lists, the personal feed and single-article reads are implemented. URL path decoding moved from profiles.zig to url.zig; the same module now owns query decoding/pagination. Article query families and DTO serialization live in articles.zig. Shared test lifecycle helpers were extracted from milestone 3 without removing its checks.
+
+- ReleaseSafe build and eleven unit checks passed. Linux x86_64 semantic/object-only compilation passed; no linked Linux runtime is claimed.
+- All 119 upstream steps before favourite writes passed, including all 51 article/feed read checks. Every normalized response in that prefix matches the unchanged Go reference. Its fresh full run passed 197/197.
+- The full Zig run reports 141 steps, 123 passed and 18 failed, then aborts at missing comment creation. Favourite/comment writes and reads depending on those writes remain incomplete. Two later profile calls remain unreached. This is not a full conformance pass.
+- Fifteen article/feed scenarios passed: upstream read gate; normalized comparison; single-object escaping/arrays/UTC dates; ordering and compact lists; precedence and empty pages; duplicate/encoded query parameters; feed and viewer flags; auth; mutation freshness; fragmented/pipelined requests; 96 concurrent reads; all five count families above the cap and large offsets; count-stage failure; page-stage failure/reuse; slow readers and response bounds.
+- Five query families retain articlesCount = 1000 even for pages after offset 1000. Valid offsets through signed-64-bit maximum produce empty pages without integer wraparound. A tested reference feed request at offset 2147483647 fails with 500 due to int32 casts; my query follows the allowed pagination range instead.
+- A private row-level-security fault rejects only the second/count statement. Both a populated and an empty first page return 503 with no leaked partial list, then the connection works after fault removal. No schema file or shared database is changed by this check.
+- Slow/disconnected readers of a 3 MiB article do not prevent tags from progressing. Escaped output beyond the 4 MiB response bound returns 503. This is a correctness/resource test, not a throughput measurement.
+- The earlier 11 tags, 13 auth and 15 profile scenarios still pass, including the deferred-commit failure check.
+
+No new tools or automatic services were installed. Temporary databases/servers are removed. Complete logs and normalized transcripts are under work/results/milestone4; selected evidence is copied to outputs. Optimisation, Linux runtime validation and an official score remain outstanding.
+
 ## Next checkpoint
 
-Add article and feed reads, then the remaining writes. Reconnection and additional protocol coverage belong before optimisation. Batching and pipeline depth are later controlled experiments against this simple execution path.
+Add the remaining writes, comments and favourites. Reconnection and additional protocol coverage belong before optimisation. Batching and pipeline depth are later controlled experiments against this simple execution path.

@@ -2,6 +2,7 @@ const std = @import("std");
 const c = std.c;
 const http = @import("http.zig");
 const profiles = @import("profiles.zig");
+const articles = @import("articles.zig");
 
 // Minimal declarations from PostgreSQL 18's public libpq-fe.h ABI.
 pub const Conn = opaque {};
@@ -44,8 +45,17 @@ pub fn connect(url: [*:0]const u8, io: std.Io) !*Conn {
     return error.DatabaseConnectTimeout;
 }
 
-pub fn query(conn: *Conn, route: http.Route, params: []const ?[:0]const u8) !void {
-    const statement: [*:0]const u8 = switch (route) {
+pub fn query(conn: *Conn, route: http.Route, params: []const ?[:0]const u8, read: ?articles.Read) !void {
+    var actual = params;
+    const statement: [:0]const u8 = if (read) |r| blk: {
+        if (r.phase == .count) actual = switch (r.family) {
+            .all => &.{},
+            .feed => params[0..1],
+            .single => unreachable,
+            else => params[3..4],
+        };
+        break :blk r.statement();
+    } else switch (route) {
         .tags => "SELECT name FROM tags ORDER BY name",
         .register => "INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email, bio, image",
         .login => "SELECT id, username, email, bio, image, password_hash FROM users WHERE email = $1",
@@ -54,12 +64,12 @@ pub fn query(conn: *Conn, route: http.Route, params: []const ?[:0]const u8) !voi
         .profile => profiles.get_sql,
         .follow => profiles.follow_sql,
         .unfollow => profiles.unfollow_sql,
-        .unknown => unreachable,
+        .articles, .feed, .article, .unknown => unreachable,
     };
     var values: [6]?[*:0]const u8 = @splat(null);
-    for (params, 0..) |param, i| values[i] = if (param) |p| p.ptr else null;
+    for (actual, 0..) |param, i| values[i] = if (param) |p| p.ptr else null;
     // libpq copies the parameter bytes before this call returns.
-    if (PQsendQueryParams(conn, statement, @intCast(params.len), null, &values, null, null, 0) != 1) return error.DatabaseQuery;
+    if (PQsendQueryParams(conn, statement.ptr, @intCast(actual.len), null, &values, null, null, 0) != 1) return error.DatabaseQuery;
 }
 
 pub fn status(result: *Result) u16 {
@@ -128,4 +138,71 @@ pub fn tagsJson(result: *Result, allocator: std.mem.Allocator) ![]u8 {
         name.* = PQgetvalue(result, row, 0)[0..len];
     }
     return std.json.Stringify.valueAlloc(allocator, .{ .tags = names }, .{});
+}
+
+fn cell(result: *Result, row: c_int, column: c_int) ?[]const u8 {
+    if (PQgetisnull(result, row, column) != 0) return null;
+    return PQgetvalue(result, row, column)[0..@intCast(PQgetlength(result, row, column))];
+}
+
+fn required(result: *Result, row: c_int, column: c_int) ![]const u8 {
+    return cell(result, row, column) orelse error.DatabaseResult;
+}
+
+fn textCell(result: *Result, row: c_int, column: c_int, allocator: std.mem.Allocator) ![]const u8 {
+    return allocator.dupe(u8, try required(result, row, column));
+}
+
+fn nullableCell(result: *Result, row: c_int, column: c_int, allocator: std.mem.Allocator) !?[]const u8 {
+    return if (cell(result, row, column)) |value| try allocator.dupe(u8, value) else null;
+}
+
+fn boolean(result: *Result, row: c_int, column: c_int) !bool {
+    const value = try required(result, row, column);
+    if (std.mem.eql(u8, value, "t")) return true;
+    if (std.mem.eql(u8, value, "f")) return false;
+    return error.DatabaseResult;
+}
+
+pub fn articlePage(result: *Result, allocator: std.mem.Allocator, full: bool) ![]articles.Article {
+    const columns: c_int = if (full) 13 else 12;
+    if (PQresultStatus(result) != 2 or PQnfields(result) != columns) return error.DatabaseResult;
+    const count: usize = @intCast(PQntuples(result));
+    if (count > @as(usize, if (full) 1 else 100)) return error.DatabaseResult;
+    const rows = try allocator.alloc(articles.Article, count);
+    var total: usize = 0;
+    for (rows, 0..) |*article, index| {
+        const row: c_int = @intCast(index);
+        for (0..@intCast(columns)) |column| {
+            total += @intCast(PQgetlength(result, row, @intCast(column)));
+            if (total > 4 * 1024 * 1024) return error.ResponseTooLarge;
+        }
+        const favorites = std.fmt.parseInt(i64, try required(result, row, 6), 10) catch return error.DatabaseResult;
+        if (favorites < 0) return error.DatabaseResult;
+        article.* = .{
+            .slug = try textCell(result, row, 0, allocator),
+            .title = try textCell(result, row, 1, allocator),
+            .description = try textCell(result, row, 2, allocator),
+            .createdAt = try textCell(result, row, 3, allocator),
+            .updatedAt = try textCell(result, row, 4, allocator),
+            .tagList = try articles.tags(allocator, try required(result, row, 5)),
+            .favoritesCount = favorites,
+            .favorited = try boolean(result, row, 7),
+            .author = .{
+                .username = try textCell(result, row, 8, allocator),
+                .bio = try nullableCell(result, row, 9, allocator),
+                .image = try nullableCell(result, row, 10, allocator),
+                .following = try boolean(result, row, 11),
+            },
+            .body = if (full) try textCell(result, row, 12, allocator) else null,
+        };
+    }
+    return rows;
+}
+
+pub fn articleCount(result: *Result) !i64 {
+    if (PQresultStatus(result) != 2 or PQntuples(result) != 1 or PQnfields(result) != 1) return error.DatabaseResult;
+    const count = std.fmt.parseInt(i64, try required(result, 0, 0), 10) catch return error.DatabaseResult;
+    if (count < 0 or count > 1000) return error.DatabaseResult;
+    return count;
 }

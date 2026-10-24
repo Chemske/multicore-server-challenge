@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """Check profiles/follows, transaction boundaries and the unchanged upstream contract."""
-import base64
 import concurrent.futures
 from contextlib import contextmanager
-import hmac
-import http.client
 import json
 import os
 from pathlib import Path
@@ -13,6 +10,9 @@ import socket
 import subprocess
 import time
 from urllib.parse import quote
+
+from support import Server as DisposableServer, literal, raw_response, sql, upstream
+from support import mint as issue_token
 
 submission = Path(__file__).resolve().parents[1]
 repo = submission.parents[1]
@@ -23,93 +23,12 @@ secret = 'milestone-profiles-test-only'
 checks = []
 
 
-def sql(statement, database='postgres'):
-    return subprocess.check_output(['psql', '-X', '-v', 'ON_ERROR_STOP=1', '-At',
-                                    '-d', database, '-c', statement], text=True).strip()
-
-
-def literal(value):
-    return "'" + value.replace("'", "''") + "'"
-
-
-def free_port():
-    with socket.socket() as probe:
-        probe.bind(('127.0.0.1', 0))
-        return probe.getsockname()[1]
+def Server(label, executable):
+    return DisposableServer(results, secret, 'profiles', label, executable)
 
 
 def mint(identifier, expiry=None):
-    def encode(value):
-        return base64.urlsafe_b64encode(json.dumps(value, separators=(',', ':')).encode()).rstrip(b'=')
-    now = int(time.time())
-    message = encode({'alg': 'HS256'}) + b'.' + encode({'sub': str(identifier), 'iat': now, 'exp': expiry or now + 3600})
-    return (message + b'.' + base64.urlsafe_b64encode(hmac.digest(secret.encode(), message, 'sha256')).rstrip(b'=')).decode()
-
-
-class Server:
-    def __init__(self, label, executable):
-        self.database = f'challenge_profiles_{label}_{os.getpid()}'
-        self.port = free_port()
-        self.executable = executable
-        self.process = None
-        self.log = None
-
-    def __enter__(self):
-        sql(f'CREATE DATABASE {self.database} TEMPLATE conduit_dev')
-        try:
-            self.log = (results / f'{self.database}.log').open('w')
-            environment = dict(os.environ, HOST='127.0.0.1', PORT=str(self.port), JWT_SECRET=secret,
-                               DATABASE_URL=f"postgres://conduit:conduit@127.0.0.1:{os.environ['PGPORT']}/{self.database}")
-            self.process = subprocess.Popen([str(self.executable)], env=environment, stdout=self.log, stderr=self.log)
-            deadline = time.monotonic() + 10
-            while True:
-                try:
-                    assert self.request('GET', '/api/tags')[0] == 200
-                    return self
-                except OSError:
-                    if self.process.poll() is not None or time.monotonic() > deadline:
-                        raise RuntimeError('server did not become healthy')
-                    time.sleep(0.03)
-        except BaseException:
-            self.__exit__(None, None, None)
-            raise
-
-    def __exit__(self, *_):
-        if self.process is not None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
-        if self.log is not None:
-            self.log.close()
-        sql(f'DROP DATABASE IF EXISTS {self.database} WITH (FORCE)')
-
-    def request(self, method, path, token=None, body=None, headers=None):
-        fields = dict(headers or {})
-        if token is not None:
-            fields['Authorization'] = 'Token ' + token
-        if body is not None and not isinstance(body, (str, bytes)):
-            body = json.dumps(body).encode()
-            fields['Content-Type'] = 'application/json'
-        connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
-        try:
-            connection.request(method, path, body=body, headers=fields)
-            response = connection.getresponse()
-            data = json.loads(response.read())
-            assert response.getheader('Content-Type') == 'application/json'
-            if response.status >= 400:
-                assert set(data) == {'errors'} and isinstance(data['errors']['body'][0], str)
-            return response.status, data
-        finally:
-            connection.close()
-
-    def sql(self, statement):
-        return sql(statement, self.database)
-
-    def fixture(self, username):
-        return int(self.sql(f"INSERT INTO users(username,email,password_hash) SELECT {literal(username)}, {literal(username + '@example.com')}, password_hash FROM users WHERE id=1 RETURNING id").splitlines()[0])
+    return issue_token(identifier, secret, expiry)
 
 
 def check_profile(response, name, following, bio=None, image=None):
@@ -123,33 +42,6 @@ def path_for(name):
 
 def passed(name):
     checks.append(name)
-
-
-def upstream(server, label, executable):
-    transcript = results / f'{label}.jsonl'
-    run = subprocess.run([str(executable), '-base', f'http://127.0.0.1:{server.port}',
-                          '-secret', secret, '-transcript', str(transcript)],
-                         capture_output=True, text=True, timeout=90)
-    (results / f'{label}.log').write_text(run.stdout + run.stderr)
-    steps = [line for line in run.stdout.splitlines() if re.match(r'^(PASS|FAIL) (users\.|user\.|profile\.)', line)]
-    assert steps and all(line.startswith('PASS ') for line in steps), '\n'.join(steps)
-    summary = next(line for line in run.stdout.splitlines() if re.match(r'^\d+ steps,', line))
-    return run, [json.loads(line) for line in transcript.read_text().splitlines()], steps, summary
-
-
-def raw_response(reader):
-    line = reader.readline()
-    assert line, 'connection ended before response headers'
-    status = int(line.split()[1])
-    headers = {}
-    while True:
-        line = reader.readline()
-        if line == b'\r\n':
-            break
-        assert line
-        key, value = line.decode().split(':', 1)
-        headers[key.lower()] = value.strip()
-    return status, json.loads(reader.read(int(headers['content-length'])))
 
 
 @contextmanager
@@ -188,7 +80,7 @@ with Server('zig', submission / 'zig-out/bin/conduit') as zig, Server('go', refe
     assert len(profiles) == 16
     assert all(step == normalized[step['step']] for step in profiles)
     passed('all 16 normalized upstream profile responses match the unchanged Go reference')
-    print('Zig full upstream run (article/feed routes remain unimplemented): ' + summary, flush=True)
+    print('Zig full upstream run (later routes remain unimplemented): ' + summary, flush=True)
     print('Unchanged Go reference: ' + golden_summary, flush=True)
 
     # Apply the same ordinary operation trace to independent databases.

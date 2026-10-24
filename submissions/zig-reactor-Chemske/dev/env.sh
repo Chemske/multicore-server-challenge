@@ -19,6 +19,7 @@ export GOPATH="$CHALLENGE_WORK/cache/go-path" GOTOOLCHAIN=local
 export ZIG_GLOBAL_CACHE_DIR="$CHALLENGE_WORK/cache/zig-global"
 export ZIG_LOCAL_CACHE_DIR="$CHALLENGE_WORK/cache/zig-local"
 export TMPDIR="$CHALLENGE_WORK/tmp" PSQL_HISTORY="$CHALLENGE_WORK/runtime/psql_history"
+export PYTHONDONTWRITEBYTECODE=1
 export PGDATA="$CHALLENGE_WORK/runtime/postgres-18"
 export PGHOST=127.0.0.1 PGPORT=55432 PGUSER=challenge_admin PGDATABASE=postgres
 # Disposable local development credentials; never used outside this cluster.

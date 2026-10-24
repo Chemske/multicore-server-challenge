@@ -296,11 +296,32 @@ const Server = struct {
             const task = self.active.?;
             const result = pg.PQgetResult(connection) orelse {
                 // The statement is fully drained, including its transaction completion.
+                if (self.isLive(task) and task.status == 200) {
+                    if (task.read) |*read| {
+                        if (read.family != .single and read.phase == .page) {
+                            read.phase = .count;
+                            task.status = 503;
+                            self.active_since = self.now();
+                            pg.query(connection, task.route, task.params[0..task.param_count], task.read) catch {
+                                self.databaseFailed();
+                                return;
+                            };
+                            try self.databaseReady(false);
+                            return;
+                        }
+                    }
+                }
                 self.active = null;
                 if (!self.isLive(task)) {
                     task.destroy(self.allocator);
                 } else if (task.status != 200) {
                     self.finish(task, task.status, "{\"errors\":{\"body\":[\"query failed\"]}}");
+                } else if (task.read) |read| {
+                    const body = read.json(task.arena.allocator()) catch {
+                        self.finish(task, 503, "{\"errors\":{\"body\":[\"article response unavailable\"]}}");
+                        return;
+                    };
+                    self.finish(task, 200, body);
                 } else if (task.route == .tags or task.route.isProfile()) {
                     self.finish(task, 200, task.body.?);
                 } else if (task.route == .login) {
@@ -317,7 +338,18 @@ const Server = struct {
             defer pg.PQclear(result);
             task.status = pg.status(result);
             if (task.status != 200) continue;
-            if (task.route == .tags) {
+            if (task.read) |*read| {
+                if (read.phase == .page) {
+                    read.rows = pg.articlePage(result, task.arena.allocator(), read.family == .single) catch {
+                        task.status = 503;
+                        continue;
+                    };
+                    if (read.family == .single and read.rows.len == 0) task.status = 404;
+                } else read.count = pg.articleCount(result) catch {
+                    task.status = 503;
+                    continue;
+                };
+            } else if (task.route == .tags) {
                 task.body = pg.tagsJson(result, task.arena.allocator()) catch null;
                 if (task.body == null) task.status = 503;
             } else if (task.route.isProfile()) {
@@ -350,7 +382,7 @@ const Server = struct {
         };
         self.active = task;
         self.active_since = self.now();
-        pg.query(connection, task.route, task.params[0..task.param_count]) catch {
+        pg.query(connection, task.route, task.params[0..task.param_count], task.read) catch {
             self.databaseFailed();
             return;
         };
@@ -458,7 +490,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..clients.len) |index| server.closeClient(index);
         if (server.active) |task| task.destroy(allocator);
     }
-    std.log.info("milestone 3: tags, users/auth and profiles/follows on {s}:{d}; one database connection, two bcrypt workers", .{ host, port });
+    std.log.info("milestone 4: article/feed reads, tags, users and profiles on {s}:{d}; one database connection, two bcrypt workers", .{ host, port });
     try server.run();
 }
 
@@ -467,4 +499,6 @@ test {
     _ = @import("auth.zig");
     _ = bcrypt;
     _ = @import("profiles.zig");
+    _ = @import("url.zig");
+    _ = @import("articles.zig");
 }
