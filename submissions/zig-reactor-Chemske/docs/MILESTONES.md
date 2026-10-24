@@ -39,8 +39,31 @@ Date: 2026-10-24. Registration, login, current-user read and current-user update
 
 No new application, package manager installation or background service was added. Test databases and temporary servers are removed by the test scripts. Results and the unchanged suite's complete log/transcript stay in work/results/milestone2; selected evidence is copied to outputs.
 
+## Milestone 3: execution plan
+
+Implement profile reads, follow and unfollow. Profile reads allow anonymous access only when the Authorization header is absent; a present invalid header returns 401. Follow/unfollow require a verified token. The viewer is a parameter on every query, never connection state or cached profile data.
+
+Dynamic usernames are matched as one encoded path segment, decoded exactly once, validated and copied before the HTTP input buffer moves. This preserves literal plus signs, Unicode and encoded separators without turning a username into a different route.
+
+Each follow/unfollow uses one parameterized SQL statement containing the target lookup and the mutation in its own implicit transaction. Repeated operations return the requested following state even if no row changes. The response uses the target snapshot and explicit operation result; it does not reread the follows table inside the data-modifying CTE's old snapshot. No success is sent until libpq reaches the completed transaction boundary. This follows [PostgreSQL 18's documented CTE semantics](https://www.postgresql.org/docs/18/queries-with.html#QUERIES-WITH-MODIFYING).
+
+The gate is the unchanged upstream users/auth and profiles sections, targeted viewer isolation/idempotence/commit/failure tests, a comparison with the unchanged Go reference, and the earlier milestone regressions. Feed and article routes remain the next checkpoint. No new installed software is needed.
+
+## Milestone 3: results
+
+Date: 2026-10-24. Profile reads, follow and unfollow are implemented. The request-lifetime module is now named requests.zig because it serves both users and profiles; SQL and username-path policy for profiles live in profiles.zig.
+
+- ReleaseSafe build and eight unit checks passed, including route boundaries and single-pass URL decoding.
+- All 50 users/auth and all 16 profile steps reached before article creation pass in the unchanged suite. The full Zig run reports 137 steps, 73 passed and 64 failed, then aborts at unimplemented article creation. Two profile calls in the later comments section remain unreached. This is not a full conformance pass.
+- A fresh full run of the unchanged Go reference passed 197/197 steps. All 16 reached normalized profile responses match it exactly.
+- Fifteen profile scenarios passed: upstream contract; normalized comparison; an independent Go/Zig follow/unfollow trace; encoded names; strict auth; committed row counts; self-follow; fresh reads after mutation/rename; fragmented/pipelined requests with changing identities; invalid paths; 64 contending requests; blocked follow and unfollow; deferred commit failure; SQL errors/reuse; client disconnect during a blocked write.
+- The deferred-failure test inserts a relation, rejects the transaction at its commit boundary, requires 503, verifies that the row rolled back, and confirms connection reuse. Its temporary trigger exists only in the disposable test clone. No official schema or seed file changes are involved.
+- The 11 tags and 13 auth regression scenarios still pass. Linux x86_64 semantic/object-only compilation passed; no linked or executed Linux validation or performance score is claimed.
+
+The specification says a present invalid Authorization header is 401 even on optional-auth routes. The Go reference's Header.Get check treats an empty value as absent. I preserve header presence and return 401; a focused regression records this deliberate difference. Self-follow remains allowed, matching the fixed schema and the reference. Repeated operations are idempotent.
+
+No software installation or automatic service was added. Both test clones and all temporary servers are removed. Results live under work/results/milestone3, with selected evidence copied to outputs.
+
 ## Next checkpoint
 
-Finish the users/auth gate above, then add profiles and follows.
-
-After users/auth, add profiles/follows and the read endpoints, then the remaining writes. Reconnection and additional protocol coverage belong before optimisation. Batching and pipeline depth are later controlled experiments against this simple execution path.
+Add article and feed reads, then the remaining writes. Reconnection and additional protocol coverage belong before optimisation. Batching and pipeline depth are later controlled experiments against this simple execution path.

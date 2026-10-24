@@ -1,6 +1,6 @@
 # Proposed architecture
 
-Status: design, not implemented. I will keep a simple unbatched execution path as the correctness and measurement control.
+Status: target design. The native single-owner tags, users/auth and profiles/follows path is implemented. Multiple shards, batching, pipelines and reconnects remain planned. I keep the unbatched execution path as the correctness and measurement control.
 
 ## Ownership and flow
 

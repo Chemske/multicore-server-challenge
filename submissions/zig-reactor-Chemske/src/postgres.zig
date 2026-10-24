@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = std.c;
 const http = @import("http.zig");
+const profiles = @import("profiles.zig");
 
 // Minimal declarations from PostgreSQL 18's public libpq-fe.h ABI.
 pub const Conn = opaque {};
@@ -50,6 +51,9 @@ pub fn query(conn: *Conn, route: http.Route, params: []const ?[:0]const u8) !voi
         .login => "SELECT id, username, email, bio, image, password_hash FROM users WHERE email = $1",
         .current => "SELECT id, username, email, bio, image FROM users WHERE id = $1",
         .update => "UPDATE users SET email = COALESCE($2, email), username = COALESCE($3, username), password_hash = COALESCE($4, password_hash), bio = COALESCE($5, bio), image = COALESCE($6, image) WHERE id = $1 RETURNING id, username, email, bio, image",
+        .profile => profiles.get_sql,
+        .follow => profiles.follow_sql,
+        .unfollow => profiles.unfollow_sql,
         .unknown => unreachable,
     };
     var values: [6]?[*:0]const u8 = @splat(null);
@@ -92,6 +96,21 @@ pub fn user(result: *Result, allocator: std.mem.Allocator, login: bool) !?User {
         .image = try field(result, 4, allocator),
         .hash = if (login) try field(result, 5, allocator) else null,
     };
+}
+
+pub fn profileJson(result: *Result, allocator: std.mem.Allocator) !?[]const u8 {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != 5) return error.DatabaseResult;
+    if (PQntuples(result) == 0) return null;
+    if (PQntuples(result) != 1 or PQgetisnull(result, 0, 4) != 0 or PQgetlength(result, 0, 4) != 1) return error.DatabaseResult;
+    const flag = PQgetvalue(result, 0, 4)[0];
+    if (flag != 't' and flag != 'f') return error.DatabaseResult;
+    const profile: profiles.Profile = .{
+        .username = (try field(result, 1, allocator)) orelse return error.DatabaseResult,
+        .bio = try field(result, 2, allocator),
+        .image = try field(result, 3, allocator),
+        .following = flag == 't',
+    };
+    return try std.json.Stringify.valueAlloc(allocator, .{ .profile = profile }, .{});
 }
 
 pub fn tagsJson(result: *Result, allocator: std.mem.Allocator) ![]u8 {

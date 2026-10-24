@@ -5,8 +5,31 @@ extern "c" fn phr_parse_request([*]const u8, usize, *?[*]const u8, *usize, *?[*]
 
 pub const max_head = 16 * 1024;
 pub const max_body = 64 * 1024;
-pub const Route = enum { tags, register, login, current, update, unknown };
-pub const Request = struct { consumed: usize, route: Route, keep_alive: bool, body: []const u8, authorization: ?[]const u8 };
+pub const Auth = enum { none, optional, required };
+pub const Route = enum {
+    tags,
+    register,
+    login,
+    current,
+    update,
+    profile,
+    follow,
+    unfollow,
+    unknown,
+
+    pub fn auth(self: Route) Auth {
+        return switch (self) {
+            .current, .update, .follow, .unfollow => .required,
+            .profile => .optional,
+            else => .none,
+        };
+    }
+
+    pub fn isProfile(self: Route) bool {
+        return self == .profile or self == .follow or self == .unfollow;
+    }
+};
+pub const Request = struct { consumed: usize, route: Route, argument: []const u8, keep_alive: bool, body: []const u8, authorization: ?[]const u8 };
 pub const Parse = union(enum) { more, bad: u16, request: Request };
 
 pub fn parse(bytes: []const u8) Parse {
@@ -58,24 +81,40 @@ pub fn parse(bytes: []const u8) Parse {
     if (bytes.len - head_len < body_len) return .more;
     const target = path.?[0..path_len];
     const path_end = std.mem.indexOfScalar(u8, target, '?') orelse target.len;
+    const matched = route(method.?[0..method_len], target[0..path_end]);
     return .{ .request = .{
         .consumed = head_len + body_len,
-        .route = route(method.?[0..method_len], target[0..path_end]),
+        .route = matched.route,
+        .argument = matched.argument,
         .keep_alive = !close,
         .body = bytes[head_len..][0..body_len],
         .authorization = authorization,
     } };
 }
 
-fn route(method: []const u8, path: []const u8) Route {
+const Match = struct { route: Route, argument: []const u8 = "" };
+
+fn route(method: []const u8, path: []const u8) Match {
     if (std.mem.eql(u8, method, "GET")) {
-        if (std.mem.eql(u8, path, "/api/tags")) return .tags;
-        if (std.mem.eql(u8, path, "/api/user")) return .current;
+        if (std.mem.eql(u8, path, "/api/tags")) return .{ .route = .tags };
+        if (std.mem.eql(u8, path, "/api/user")) return .{ .route = .current };
     } else if (std.mem.eql(u8, method, "POST")) {
-        if (std.mem.eql(u8, path, "/api/users")) return .register;
-        if (std.mem.eql(u8, path, "/api/users/login")) return .login;
-    } else if (std.mem.eql(u8, method, "PUT") and std.mem.eql(u8, path, "/api/user")) return .update;
-    return .unknown;
+        if (std.mem.eql(u8, path, "/api/users")) return .{ .route = .register };
+        if (std.mem.eql(u8, path, "/api/users/login")) return .{ .route = .login };
+    } else if (std.mem.eql(u8, method, "PUT") and std.mem.eql(u8, path, "/api/user")) return .{ .route = .update };
+    const prefix = "/api/profiles/";
+    if (std.mem.startsWith(u8, path, prefix)) {
+        const tail = path[prefix.len..];
+        const end = std.mem.indexOfScalar(u8, tail, '/') orelse tail.len;
+        if (end != 0) {
+            if (end == tail.len and std.mem.eql(u8, method, "GET")) return .{ .route = .profile, .argument = tail };
+            if (std.mem.eql(u8, tail[end..], "/follow")) {
+                if (std.mem.eql(u8, method, "POST")) return .{ .route = .follow, .argument = tail[0..end] };
+                if (std.mem.eql(u8, method, "DELETE")) return .{ .route = .unfollow, .argument = tail[0..end] };
+            }
+        }
+    }
+    return .{ .route = .unknown };
 }
 
 test "partial headers, close dominance and conflicting framing" {
@@ -100,4 +139,17 @@ test "body framing waits for all bytes and leaves the next request intact" {
     try std.testing.expectEqualStrings("{}", request.body);
     try std.testing.expectEqual(head.len + 2, request.consumed);
     try std.testing.expect(parse("POST /api/users HTTP/1.1\r\nHost: x\r\nContent-Length: 65537\r\n\r\n") == .bad);
+}
+
+test "profile routes match encoded segments before decoding and ignore query text" {
+    const get = parse("GET /api/profiles/a%2Fb+%25?x=/follow HTTP/1.1\r\nHost: x\r\n\r\n").request;
+    try std.testing.expectEqual(Route.profile, get.route);
+    try std.testing.expectEqualStrings("a%2Fb+%25", get.argument);
+    const follow = parse("POST /api/profiles/a%2Fb/follow HTTP/1.1\r\nHost: x\r\n\r\n").request;
+    try std.testing.expectEqual(Route.follow, follow.route);
+    try std.testing.expectEqualStrings("a%2Fb", follow.argument);
+    try std.testing.expectEqual(Route.unknown, route("GET", "/api/profiles/a/b").route);
+    try std.testing.expectEqual(Route.unknown, route("POST", "/api/profiles//follow").route);
+    try std.testing.expectEqual(Route.unknown, route("PUT", "/api/profiles/a/follow").route);
+    try std.testing.expectEqual(Route.unknown, route("POST", "/api/profiles/a/follow/extra").route);
 }

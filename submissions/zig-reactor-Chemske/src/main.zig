@@ -3,7 +3,7 @@ const c = std.c;
 const events = @import("events.zig");
 const http = @import("http.zig");
 const pg = @import("postgres.zig");
-const users = @import("users.zig");
+const requests = @import("requests.zig");
 const bcrypt = @import("bcrypt_pool.zig");
 
 const max_clients = 256;
@@ -22,7 +22,7 @@ const Client = struct {
     keep_alive: bool = true,
     last_activity: i64 = 0,
     sequence: u64 = 0,
-    task: ?*users.Task = null,
+    task: ?*requests.Task = null,
 };
 
 const Server = struct {
@@ -35,7 +35,7 @@ const Server = struct {
     pool: *bcrypt.Pool,
     secret: []const u8,
     sequence: u64 = 0,
-    active: ?*users.Task = null,
+    active: ?*requests.Task = null,
     active_since: i64 = 0,
 
     fn now(self: *Server) i64 {
@@ -130,10 +130,11 @@ const Server = struct {
                     try self.respond(index, 404, "{\"errors\":{\"body\":[\"route not implemented\"]}}");
                     return;
                 }
-                const task = users.Task.create(self.allocator, request, .{ .index = index, .generation = client.generation }, self.secret, self.wallTime()) catch |err| {
+                const task = requests.Task.create(self.allocator, request, .{ .index = index, .generation = client.generation }, self.secret, self.wallTime()) catch |err| {
                     consume(client, request.consumed);
-                    const status: u16 = if (err == error.Unauthorized) 401 else if (err == error.Validation) 422 else 503;
-                    try self.respond(index, status, "{\"errors\":{\"body\":[\"invalid user request\"]}}");
+                    if (err == error.InvalidPath) client.keep_alive = false;
+                    const status: u16 = if (err == error.Unauthorized) 401 else if (err == error.InvalidPath) 400 else if (err == error.Validation) 422 else 503;
+                    try self.respond(index, status, "{\"errors\":{\"body\":[\"invalid request\"]}}");
                     return;
                 };
                 consume(client, request.consumed);
@@ -150,7 +151,7 @@ const Server = struct {
         client.input.items.len = remaining;
     }
 
-    fn queue(self: *Server, task: *users.Task) void {
+    fn queue(self: *Server, task: *requests.Task) void {
         const index = task.recipient.index;
         const client = &self.clients[index];
         client.state = .queued;
@@ -159,7 +160,7 @@ const Server = struct {
         self.loop.watch(client.fd, self.token(index), false, false) catch self.closeClient(index);
     }
 
-    fn startHash(self: *Server, task: *users.Task) void {
+    fn startHash(self: *Server, task: *requests.Task) void {
         const index = task.recipient.index;
         self.clients[index].state = .hashing;
         self.loop.watch(self.clients[index].fd, self.token(index), false, false) catch {
@@ -173,7 +174,7 @@ const Server = struct {
         if (!self.pool.submit(&task.job)) self.finish(task, 503, "{\"errors\":{\"body\":[\"password queue full\"]}}");
     }
 
-    fn finish(self: *Server, task: *users.Task, status: u16, body: []const u8) void {
+    fn finish(self: *Server, task: *requests.Task, status: u16, body: []const u8) void {
         defer task.destroy(self.allocator);
         if (!self.isLive(task)) return;
         const index = task.recipient.index;
@@ -181,7 +182,7 @@ const Server = struct {
         self.respond(index, status, body) catch self.closeClient(index);
     }
 
-    fn userResponse(self: *Server, task: *users.Task) void {
+    fn userResponse(self: *Server, task: *requests.Task) void {
         const body = task.userBody(self.secret, self.wallTime()) catch {
             self.finish(task, 503, "{\"errors\":{\"body\":[\"response unavailable\"]}}");
             return;
@@ -193,7 +194,7 @@ const Server = struct {
         var completed: [bcrypt.capacity]*bcrypt.Job = undefined;
         const count = self.pool.collect(&completed);
         for (completed[0..count]) |job| {
-            const task: *users.Task = @fieldParentPtr("job", job);
+            const task: *requests.Task = @fieldParentPtr("job", job);
             if (!self.isLive(task)) {
                 task.destroy(self.allocator);
             } else if (!job.ok) {
@@ -273,7 +274,7 @@ const Server = struct {
         }
     }
 
-    fn isLive(self: *Server, task: *users.Task) bool {
+    fn isLive(self: *Server, task: *requests.Task) bool {
         const client = self.clients[task.recipient.index];
         return (client.state == .queued or client.state == .hashing) and
             client.generation == task.recipient.generation and client.task == task;
@@ -299,8 +300,8 @@ const Server = struct {
                 if (!self.isLive(task)) {
                     task.destroy(self.allocator);
                 } else if (task.status != 200) {
-                    self.finish(task, task.status, "{\"errors\":{\"body\":[\"user query failed\"]}}");
-                } else if (task.route == .tags) {
+                    self.finish(task, task.status, "{\"errors\":{\"body\":[\"query failed\"]}}");
+                } else if (task.route == .tags or task.route.isProfile()) {
                     self.finish(task, 200, task.body.?);
                 } else if (task.route == .login) {
                     const hash = task.row.?.hash orelse "";
@@ -319,6 +320,12 @@ const Server = struct {
             if (task.route == .tags) {
                 task.body = pg.tagsJson(result, task.arena.allocator()) catch null;
                 if (task.body == null) task.status = 503;
+            } else if (task.route.isProfile()) {
+                task.body = pg.profileJson(result, task.arena.allocator()) catch {
+                    task.status = 503;
+                    continue;
+                };
+                if (task.body == null) task.status = 404;
             } else {
                 task.row = pg.user(result, task.arena.allocator(), task.route == .login) catch {
                     task.status = 503;
@@ -430,7 +437,7 @@ pub fn main(init: std.process.Init) !void {
         var completed: [bcrypt.capacity]*bcrypt.Job = undefined;
         const count = pool.collect(&completed);
         for (completed[0..count]) |job| {
-            const task: *users.Task = @fieldParentPtr("job", job);
+            const task: *requests.Task = @fieldParentPtr("job", job);
             task.destroy(allocator);
         }
     }
@@ -451,7 +458,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..clients.len) |index| server.closeClient(index);
         if (server.active) |task| task.destroy(allocator);
     }
-    std.log.info("milestone 2: tags and users/auth on {s}:{d}; one database connection, two bcrypt workers", .{ host, port });
+    std.log.info("milestone 3: tags, users/auth and profiles/follows on {s}:{d}; one database connection, two bcrypt workers", .{ host, port });
     try server.run();
 }
 
@@ -459,4 +466,5 @@ test {
     _ = http;
     _ = @import("auth.zig");
     _ = bcrypt;
+    _ = @import("profiles.zig");
 }

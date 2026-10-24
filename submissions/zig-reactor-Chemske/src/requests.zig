@@ -3,6 +3,7 @@ const http = @import("http.zig");
 const auth = @import("auth.zig");
 const pg = @import("postgres.zig");
 const bcrypt = @import("bcrypt_pool.zig");
+const profiles = @import("profiles.zig");
 
 pub const Recipient = struct { index: usize, generation: u32 };
 pub const Task = struct {
@@ -23,10 +24,16 @@ pub const Task = struct {
         self.* = .{ .arena = .init(allocator), .recipient = recipient, .route = request.route };
         errdefer self.destroy(allocator);
         const a = self.arena.allocator();
-        if (request.route == .current or request.route == .update) {
+        const policy = request.route.auth();
+        if (policy == .required or (policy == .optional and request.authorization != null)) {
             const identity = auth.verify(a, secret, request.authorization, now) catch return error.Unauthorized;
-            self.token = try a.dupe(u8, identity.token);
+            if (request.route == .current or request.route == .update) self.token = try a.dupe(u8, identity.token);
             self.params[0] = try std.fmt.allocPrintSentinel(a, "{d}", .{identity.id}, 0);
+        } else if (policy == .optional) self.params[0] = "0";
+        if (request.route.isProfile()) {
+            self.params[1] = try profiles.username(a, request.argument);
+            self.param_count = 2;
+            return self;
         }
         if (request.route == .tags) return self;
         if (request.route == .current) {
