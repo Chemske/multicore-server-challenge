@@ -134,7 +134,14 @@ try:
     checks += 1
 
     sql(f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='{database}' AND usename='conduit'")
-    assert request()[0] == 503
+    deadline = time.monotonic() + 10
+    while True:
+        answer = request()
+        if answer[0] == 200:
+            assert answer == (200, changed)
+            break
+        assert answer[0] == 503 and time.monotonic() < deadline
+        time.sleep(0.03)
     checks += 1
     print(f"PASS: {checks} milestone checks, including 64 concurrent keep-alive requests")
 finally:

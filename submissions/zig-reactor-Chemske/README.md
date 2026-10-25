@@ -2,11 +2,11 @@
 
 Front: direct
 
-**Status: milestone 5 — all API routes implemented; 197/197 development-seed conformance checks pass. Not submission-ready.**
+**Status: milestone 6 — bounded database concurrency and automatic recovery; 197/197 development-seed conformance checks pass. Not submission-ready.**
 
 I am building a Conduit implementation for the Multicore Server Challenge, targeting the highest sustainable official score. My development environment is native macOS on Apple Silicon. I keep the toolchain, database, caches and generated files within one project workspace wherever the tools allow it.
 
-The implementation is a small event-driven Zig server using the official PostgreSQL client library in non-blocking mode. It serves the complete Conduit API directly over HTTP/1.1, including article writes, favourites and comments. Nineteen fixed queries on the original API path are prepared per connection; the article/comment operation state machine still uses its original parameterized statements. Query batching, reconnection and clean Linux installation remain planned.
+The implementation is a small event-driven Zig server using the official PostgreSQL client library in non-blocking mode. It serves the complete Conduit API directly over HTTP/1.1, including article writes, favourites and comments. Four database owners progress independently and recover failed connections without replaying requests. Nineteen fixed queries on the original API path are prepared per connection; the article/comment operation state machine still uses its original parameterized statements. Query batching and clean Linux installation remain planned.
 
 The central idea is simple: **make each request create less work for the whole machine, especially PostgreSQL.** More threads are not automatically more useful when the application and database share eight CPUs.
 
@@ -17,7 +17,7 @@ The central idea is simple: **make each request create less work for the whole m
 | Application | Zig 0.17.0 |
 | Networking | Small Zig reactor; kqueue on macOS, epoll on Linux |
 | HTTP parsing | Vendored picohttpparser at 465a7ff09fbd3432fe56c673451f5460154d1f07 |
-| PostgreSQL | PostgreSQL/libpq 18.6; asynchronous named prepared queries, pipeline mode planned |
+| PostgreSQL | PostgreSQL/libpq 18.6; four owned non-blocking connections, named prepared queries and recovery; pipeline mode planned |
 | Authentication | HS256 on every authenticated request; bcrypt cost 10 in two bounded workers |
 | Deployment | Direct HTTP; official Ubuntu 24.04 x86_64 runtime contract |
 
@@ -50,6 +50,7 @@ python3 tests/milestone2.py
 python3 tests/milestone3.py
 python3 tests/milestone4.py
 python3 tests/milestone5.py
+python3 tests/recovery.py
 ```
 
 Each Python check creates and removes private database copies and launches its own server. Milestones 1–4 cover protocol behaviour, auth, profiles and article/feed reads. The profile gate checks every profile step reached by the current suite, now all 18. Milestone 5 requires the complete unchanged suite to pass and compares all 197 normalized responses with the unchanged Go reference. It also exercises failed transactions, committed writes, ownership and concurrent clients. Shared helpers use only Python's standard library. Test binaries, logs and transcripts stay under work/.
@@ -68,6 +69,7 @@ Choose an unused port so the runner's disposable server does not share the inter
 - [Competitor source review](docs/COMPETITOR_REVIEW.md): leading implementations, reproduced parser observations and specific improvement opportunities.
 - [Architecture](docs/ARCHITECTURE.md): ownership, scheduling, batching and correctness boundaries.
 - [Performance experiments](docs/PERFORMANCE.md): current rules/leaderboard recheck and reproducible local A/B measurements.
+- [Database recovery](docs/RECOVERY.md): connection ownership, setup, deadlines, failures and uncertain commits.
 - [Development and cleanup](docs/DEVELOPMENT.md): native Mac setup policy, milestone gates and removal inventory.
 
 ## Current validation
@@ -96,7 +98,11 @@ The Linux source path passes object-only cross-compilation; no linked Linux serv
 
 The first local performance experiment compares named prepared queries with the previous unprepared build. Across three runs of each on fresh development-seed clones, median throughput increased from 3,055.7 to 4,523.6 requests/s (+48.0%), and median p95 decreased from 35.615 to 17.471 ms. All 687,440 measured requests succeeded. The six-core Apple Silicon Mac with 8 GiB RAM also ran the generator and PostgreSQL; each run measured thirty seconds with accelerated think/session times. This selects a local candidate and does not establish official capacity. Complete settings, per-run results and limitations are in [PERFORMANCE.md](docs/PERFORMANCE.md). `-Dprepared-queries=false` retains an unprepared control; PostgreSQL's plan-selection heuristic remains unchanged.
 
-Current limits are deliberate: one database connection, 256 client slots, two bcrypt workers and at most 16 outstanding password jobs. Headers are limited to 16 KiB, bodies to 64 KiB and total buffered request data to 84 KiB. Chunked bodies are rejected and the connection closed. Idle clients have a 70-second timeout; active requests and database work have deadlines. A query error is drained and the connection can be reused; a lost database connection puts the service into 503 mode until restart. Reconnects, batching and the Ubuntu install script remain future work. Article reads have a 4 MiB retained-field and serialized-response bound; larger results return 503.
+The second experiment compares one, two and four owners in the same recovering implementation. Across three fresh-clone runs per setting, median throughput is 4,430.1 / 6,163.1 / 6,447.0 requests/s. Four owners improve the one-owner control by 45.5%, with median p95 falling from 17.679 to 2.073 ms. All 1,549,517 measured requests succeed. These are separate short Mac experiments; their gains must not be added or compounded. Four is the current measured local default, still requiring full-seed and target-hardware validation. `-Ddb-connections=1` preserves the simple control; the checked build-time range is 1–95.
+
+Ten recovery/concurrency scenarios additionally pass, including a stalled authentication exchange, repeated backend loss, lost COMMIT acknowledgement and a full restart of the dedicated project cluster. The server retains exactly one committed article when its acknowledgement is lost and never replays the write. A blocked writer leaves other owners serving; a timed-out transaction rolls back. All 197 unchanged upstream steps pass after recovery.
+
+Current limits are deliberate: four database connections, 256 client slots, two bcrypt workers and at most 16 outstanding password jobs. Headers are limited to 16 KiB, bodies to 64 KiB and total buffered request data to 84 KiB. Chunked bodies are rejected and the connection closed. Idle clients have a 70-second timeout; active requests and database work have deadlines. Each owned database session sets an eight-second statement timeout. Query errors are drained, transactions roll back when needed, and lost connections are replaced with bounded backoff while healthy owners continue. Batching, large-connection scheduling and the Ubuntu install script remain future work. Article reads have a 4 MiB retained-field and serialized-response bound; larger results return 503.
 
 ## Working principles
 

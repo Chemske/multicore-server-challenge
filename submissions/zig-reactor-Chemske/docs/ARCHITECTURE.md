@@ -1,6 +1,6 @@
 # Proposed architecture
 
-Status: target design. The native single-owner execution path implements every API route and passes development-seed conformance. Its original API path prepares nineteen fixed statements per connection; the later article/comment state machine retains parameterized single-query execution. Multiple shards, batching, pipelines and reconnects remain planned. I keep the unbatched execution path as the correctness and measurement control.
+Status: target design. One reactor now owns a bounded pool of independently progressing database connections, with four as the measured local default and one retained as a control. Every API route passes development-seed conformance. The original API path prepares nineteen fixed statements per connection; the later article/comment state machine retains parameterized single-query execution. Replacement connections rebuild session settings and statements without replaying requests. Multiple shards, batching and pipelines remain planned. I keep the unbatched execution path as the correctness and measurement control.
 
 ## Ownership and flow
 
@@ -8,7 +8,7 @@ Each reactor shard owns its HTTP connections, PostgreSQL connections, queues and
 
 The request path is: receive and frame HTTP → validate input and authentication → enqueue a typed operation → dispatch prepared SQL → consume and validate its result → wait for commit where required → serialize and send → release request storage.
 
-I will start with one shard for native bring-up. Worker and connection counts are measured choices rather than one worker per CPU. Database connections across all shards must remain at or below 95. Read and write ownership are separate; neither uses a thread per client.
+Native bring-up uses one shard. Worker and connection counts are measured choices rather than one worker per CPU. Database connections across all shards must remain at or below 95. The current pool assigns an entire operation to one owner; dedicated read/write pools remain a later experiment. Neither path uses a thread per client.
 
 The reactor monitors libpq's socket. It advances connection establishment, flushes output when writable, and consumes input when readable. No blocking `PQexec` belongs on the event-loop path. A PGconn has exactly one manipulating owner. Results and parameter storage have explicit lifetimes; strings borrowed from a PGresult cannot survive its release.
 

@@ -69,6 +69,47 @@ Throughput drifts down across the experiment, so the alternating controls matter
 
 The candidate passes twelve Zig unit checks, the unchanged official runner's 197 steps, normalized comparison of all 197 responses against the unchanged Go reference, and the existing 11/13/15/15/15 focused scenario groups. The optional unprepared build also passes the complete write gate and 197-step reference comparison. Linux object-only semantic compilation succeeds; a linked Linux runtime, clean installer and full-seed run remain outstanding.
 
+## Experiment 2: bounded database concurrency
+
+I compared one, two and four connections in the same implementation, including the same automatic recovery and session timeout. This isolates pool size from the earlier prepared-query change. One reactor owns all connections and dispatches the oldest queued request to an idle owner. Each owner retains its request until all stages and transaction boundaries are complete. No read batching, pipelining, dedicated write pool or data cache is added.
+
+Build each setting with `-Ddb-connections=1`, `2` or `4` and the same ReleaseSafe optimisation. The harness accepts a third executable:
+
+```sh
+python3 benchmarks/compare.py \
+  --control "$CHALLENGE_WORK/experiments/database-concurrency/one" \
+  --candidate "$CHALLENGE_WORK/experiments/database-concurrency/two" \
+  --third "$CHALLENGE_WORK/experiments/database-concurrency/four" \
+  --order ABCCBAABC --think-scale 0.005 \
+  --out "$CHALLENGE_WORK/experiments/database-concurrency/comparison"
+```
+
+The host, development seed, 128 virtual users, ten-second ramp, thirty-second measured windows and three-second tails match the first experiment. Every run gets a fresh clone. No tests or builds ran during these nine load runs. This is a new within-session comparison; I do not add or compound improvements from separate sessions.
+
+| Run | Connections | Requests/s | p95 ms | p99 ms | Errors / measured requests |
+|---|---:|---:|---:|---:|---:|
+| 1 | 1 | 5,006.9 | 12.927 | 19.919 | 0 / 150,208 |
+| 2 | 2 | 6,219.5 | 5.151 | 9.951 | 0 / 186,584 |
+| 3 | 4 | 6,439.1 | 2.073 | 5.475 | 0 / 193,172 |
+| 4 | 4 | 6,447.0 | 2.343 | 5.447 | 0 / 193,409 |
+| 5 | 2 | 6,046.9 | 7.031 | 12.767 | 0 / 181,407 |
+| 6 | 1 | 4,406.6 | 18.543 | 27.999 | 0 / 132,197 |
+| 7 | 1 | 4,430.1 | 17.679 | 25.999 | 0 / 132,904 |
+| 8 | 2 | 6,163.1 | 5.415 | 8.983 | 0 / 184,894 |
+| 9 | 4 | 6,491.4 | 1.770 | 4.071 | 0 / 194,742 |
+
+| Connections | Median requests/s | Median per-run p95 ms | Median per-run p99 ms |
+|---:|---:|---:|---:|
+| 1 | 4,430.1 | 17.679 | 25.999 |
+| 2 | 6,163.1 | 5.415 | 9.951 |
+| 4 | 6,447.0 | 2.073 | 5.447 |
+
+All 1,549,517 measured requests succeed and all generator-limit flags are false. Four connections improve median throughput by 45.5% over one, and 4.6% over two, with lower tail latency in every four-connection run. I retain four as the current local default. At this think-time/user setting, the fastest variant approaches the offered workload, so the measurement does not establish its capacity ceiling. The full seed and official eight-vCPU target can need a different setting. Host-wide generator CPU remains unavailable on macOS.
+
+Recovery validation covers stalled authentication, bounded retry backoff, isolated and repeated backend loss, prepared-statement/session rebuilding, lost COMMIT acknowledgement without replay, healthy-owner progress during a blocked write, statement-timeout rollback, a full project-cluster restart and all 197 unchanged conformance steps after recovery. See [RECOVERY.md](RECOVERY.md). The usual twelve unit checks and earlier API/fault regressions also pass.
+
+Raw results, endpoint distributions and executable fingerprints are under `work/experiments/database-concurrency/comparison/`; fault-injection evidence is under `work/results/recovery/`. The default executable is checked against the measured four-owner fingerprint after rebuilding.
+
 ## Next experiments
 
-After this first comparison, finish connection recovery, then measure bounded database concurrency and read batching independently. Replace linear client scans and the development connection limit before large direct-HTTP tests. Only then consider group commit, binary result decoding or specialised bcrypt work if profiling supports them. Keep an unbatched prepared control throughout.
+Replace linear client scans and the development connection limit before large direct-HTTP tests. Measure bounded read batching independently against the unbatched prepared control, with full-seed correctness and query plans checked before final SQL choices. Only then consider group commit, binary result decoding or specialised bcrypt work if profiling supports them. Clean Linux installation/runtime and the official capacity hold remain required.

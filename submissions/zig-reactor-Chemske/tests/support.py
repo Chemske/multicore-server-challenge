@@ -34,7 +34,7 @@ def mint(identifier, secret, expiry=None):
 
 
 class Server:
-    def __init__(self, results, secret, prefix, label, executable):
+    def __init__(self, results, secret, prefix, label, executable, database_port=None):
         self.results = results
         self.secret = secret
         self.database = f'challenge_{prefix}_{label}_{os.getpid()}'
@@ -42,13 +42,16 @@ class Server:
         self.executable = executable
         self.process = None
         self.log = None
+        self.database_port = database_port
 
     def __enter__(self):
         sql(f'CREATE DATABASE {self.database} TEMPLATE conduit_dev')
         try:
             self.log = (self.results / f'{self.database}.log').open('w')
+            database_port = self.database_port or os.environ['PGPORT']
+            options = '?sslmode=disable&gssencmode=disable' if self.database_port is not None else ''
             environment = dict(os.environ, HOST='127.0.0.1', PORT=str(self.port), JWT_SECRET=self.secret,
-                               DATABASE_URL=f"postgres://conduit:conduit@127.0.0.1:{os.environ['PGPORT']}/{self.database}")
+                               DATABASE_URL=f"postgres://conduit:conduit@127.0.0.1:{database_port}/{self.database}{options}")
             self.process = subprocess.Popen([str(self.executable)], env=environment, stdout=self.log, stderr=self.log)
             deadline = time.monotonic() + 10
             while True:

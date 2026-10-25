@@ -126,6 +126,20 @@ Nineteen fixed users/profile/tags/article-read queries are prepared once per con
 
 No tools, applications or services were installed. All benchmark/test clones and temporary servers were removed. The workspace footprint remains about 1.7 GiB under work; the dedicated cluster is approximately 437 MiB.
 
+## Milestone 6: bounded concurrency and recovery
+
+Date: 2026-10-25. One reactor now owns a fixed pool, with one active operation per connection and four connections as the measured local default. `-Ddb-connections=1` retains the serial control; build-time limits reject zero or more than 95 connections. The client state separates queued work from work already owned by a database slot.
+
+Each failed slot retires its connection and active operation without replay. Independent replacement uses readiness-driven authentication and session/statement setup, a twenty-second setup deadline and 250 ms–5 s exponential retry backoff. Generation-tagged database registrations protect replacement sockets. Healthy owners continue serving; an entirely unavailable pool fails unsent work with 503. Each owned session sets an eight-second statement timeout, matching the existing application deadline without changing global PostgreSQL configuration.
+
+- Twelve unit checks and all earlier 11/13/15/15/15 focused scenario groups pass with four owners. Every one of the 197 normalized responses matches the unchanged Go reference, and the unchanged official runner passes 197/197.
+- Ten recovery/concurrency scenarios pass: setup completion; isolated backend replacement; stalled authentication with HTTP progress and bounded attempts; admission refusal with retry backoff; lost COMMIT acknowledgement without write replay; repeated replacement/concurrent clients; independent reads during a blocked write; timeout rollback; full restart of the dedicated project cluster; all 197 upstream steps after recovery.
+- The wire proxy drops the connection after PostgreSQL reports COMMIT completion but before libpq receives it. The request returns 503, the article exists exactly once, and later replacement/new writes do not duplicate it. The proxy retains only protocol names/setup counts, never credentials or parameter values.
+- Recovery is also checked with the one-owner control. The retained unprepared build passes the full write gate and 197-response comparison. Linux x86_64 semantic/object-only compilation passes; linked Linux runtime and clean installation remain outstanding.
+- Nine fresh-clone load runs, three per setting: median 4,430.1 / 6,163.1 / 6,447.0 requests/s for one/two/four owners. Four improves the one-owner median by 45.5%; median p95 is 17.679 versus 2.073 ms and p99 is 25.999 versus 5.447 ms. All 1,549,517 measured requests succeed. Details and limitations are in PERFORMANCE.md; this is not official capacity or a full-seed measurement.
+
+The original single-connection tests now wait for actual commit/idle state after a disconnected write instead of assuming a tags response on another owner is a barrier. Their rollback, ownership and visibility assertions remain. All new code, proxy fixtures, binaries and evidence stay in the existing workspace; no application, dependency or service was installed.
+
 ## Next checkpoint
 
-Add recovery and complete protocol/runtime validation before larger concurrency changes. Then compare bounded database concurrency, read batching and pipeline depth independently against the retained unbatched prepared control. The current 256-client limit and linear scans must be replaced before large direct-HTTP tests.
+Replace the current 256-client limit and linear scans before large direct-HTTP tests. Compare read batching and pipeline depth independently against the retained unbatched prepared control. Full-seed validation must guide final SQL choices; linked Linux runtime, clean installation and the official capacity hold remain required.

@@ -239,7 +239,10 @@ with Server('zig', submission / 'zig-out/bin/conduit') as zig, Server('go', refe
                 time.sleep(0.01)
             client.close()
             assert zig.request('GET', '/api/tags')[0] == 200
-            assert zig.sql('SELECT count(*) FROM follows WHERE ' + relation) == '1'
+            deadline = time.monotonic() + 3
+            while zig.sql('SELECT count(*) FROM follows WHERE ' + relation) != '1':
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
         finally:
             client.close()
     check_profile(zig.request('GET', target, alice), 'm3_target', True, '', 'https://example.com/p.png')

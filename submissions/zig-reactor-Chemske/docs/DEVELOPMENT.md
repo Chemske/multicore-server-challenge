@@ -98,6 +98,8 @@ Milestone 5 adds no software or service installation. Its complete upstream/refe
 
 The first optimisation adds no dependencies or installed tools. Two saved executables, the pilot and the six-run comparison live under work/experiments/prepared-statements. Each run removes its private database and temporary server. All benchmark JSON, per-endpoint histograms and logs are disposable generated evidence; the comparison script itself is submitted source under benchmarks/. After validation, work remains about 1.7 GiB and the dedicated cluster is about 437 MiB. No test databases remain.
 
+Milestone 6 adds a build-time database pool size and readiness-driven replacement without installing dependencies or services. Its one/two/four-connection executables and nine raw comparison runs are under work/experiments/database-concurrency. Recovery tests use a standard-library TCP proxy and private database clones; only protocol names and setup counts are retained. The optional --restart-cluster check restarts only the dedicated project cluster, brings it back in a finally path, and temporarily affects the interactive project server. All clone databases, proxy threads and temporary servers are cleaned up.
+
 ## Repository policy
 
 All proposed submission files stay under submissions/zig-reactor-Chemske. Shared challenge files remain unchanged. Documentation is in English and distinguishes intended behaviour from verified behaviour. Reused source keeps its licence and attribution; no invented benchmark or test result belongs in the README.

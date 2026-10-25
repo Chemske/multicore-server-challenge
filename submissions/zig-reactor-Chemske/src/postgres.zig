@@ -31,22 +31,83 @@ extern "c" fn PQgetvalue(*const Result, c_int, c_int) [*]const u8;
 extern "c" fn PQgetlength(*const Result, c_int, c_int) c_int;
 extern "c" fn PQresultErrorField(*const Result, c_int) ?[*:0]const u8;
 
-pub fn connect(url: [*:0]const u8, io: std.Io) !*Conn {
-    const conn = PQconnectStart(url) orelse return error.DatabaseConnect;
-    errdefer PQfinish(conn);
-    const deadline = std.Io.Clock.awake.now(io).toMilliseconds() + 20_000;
-    while (std.Io.Clock.awake.now(io).toMilliseconds() < deadline) {
-        const state = PQconnectPoll(conn);
-        if (state == 0) return error.DatabaseConnect;
-        if (state == 3) {
-            if (PQsetnonblocking(conn, 1) != 0) return error.DatabaseNonblocking;
-            if (prepared_queries) try prepareQueries(conn, io, deadline);
-            return conn;
+pub const Interest = struct { read: bool = false, write: bool = false, ready: bool = false };
+
+// One owner advances both authentication and statement preparation from readiness
+// events. A replacement is never published until all prepared queries are drained.
+pub const Connector = struct {
+    conn: *Conn,
+    authenticating: bool = true,
+    query_index: usize = 0,
+    waiting: bool = false,
+    successful: bool = false,
+
+    pub fn start(url: [*:0]const u8) !Connector {
+        const conn = PQconnectStart(url) orelse return error.DatabaseConnect;
+        errdefer PQfinish(conn);
+        if (PQsocket(conn) < 0) return error.DatabaseConnect;
+        return .{ .conn = conn };
+    }
+
+    pub fn advance(self: *Connector, readable: bool) !Interest {
+        if (self.authenticating) {
+            switch (PQconnectPoll(self.conn)) {
+                1 => return .{ .read = true },
+                2 => return .{ .write = true },
+                3 => {
+                    if (PQsetnonblocking(self.conn, 1) != 0) return error.DatabaseNonblocking;
+                    self.authenticating = false;
+                },
+                else => return error.DatabaseConnect,
+            }
+        } else if (readable and PQconsumeInput(self.conn) != 1) return error.DatabasePrepare;
+        while (true) {
+            if (!self.waiting) {
+                if (self.query_index == 0) {
+                    // Bound abandoned backend work as well as the reactor's own
+                    // deadline. This SET affects only the connection I own.
+                    if (PQsendQueryParams(self.conn, "SET statement_timeout = '8s'", 0, null, null, null, null, 0) != 1) return error.DatabasePrepare;
+                } else {
+                    if (!prepared_queries) return .{ .ready = true };
+                    const item = prepareItem(self.query_index - 1) orelse return .{ .ready = true };
+                    if (PQsendPrepare(self.conn, item.name.ptr, item.sql.ptr, 0, null) != 1) return error.DatabasePrepare;
+                }
+                self.waiting = true;
+                self.successful = false;
+            }
+            const flush = PQflush(self.conn);
+            if (flush < 0) return error.DatabasePrepare;
+            if (PQisBusy(self.conn) != 0) return .{ .read = true, .write = flush == 1 };
+            const result = PQgetResult(self.conn) orelse {
+                if (!self.successful or PQtransactionStatus(self.conn) != 0) return error.DatabasePrepare;
+                self.query_index += 1;
+                self.waiting = false;
+                continue;
+            };
+            const ok = PQresultStatus(result) == 1;
+            PQclear(result);
+            if (!ok) return error.DatabasePrepare;
+            self.successful = true;
         }
-        const fd = PQsocket(conn);
-        if (fd < 0) return error.DatabaseConnect;
-        var fds = [_]c.pollfd{.{ .fd = fd, .events = if (state == 1) c.POLL.IN else c.POLL.OUT, .revents = 0 }};
-        if (c.poll(&fds, 1, 100) < 0 and c.errno(@as(c_int, -1)) != .INTR) return error.DatabasePoll;
+    }
+};
+
+pub fn connect(url: [*:0]const u8, io: std.Io) !*Conn {
+    var connector = try Connector.start(url);
+    errdefer PQfinish(connector.conn);
+    const deadline = std.Io.Clock.awake.now(io).toMilliseconds() + 20_000;
+    var interest: Interest = .{ .write = true };
+    while (std.Io.Clock.awake.now(io).toMilliseconds() < deadline) {
+        var fds = [_]c.pollfd{.{ .fd = PQsocket(connector.conn), .events = @as(i16, if (interest.read) c.POLL.IN else 0) | @as(i16, if (interest.write) c.POLL.OUT else 0), .revents = 0 }};
+        if (fds[0].fd < 0) return error.DatabaseConnect;
+        const count = c.poll(&fds, 1, 100);
+        if (count < 0) {
+            if (c.errno(count) == .INTR) continue;
+            return error.DatabasePoll;
+        }
+        if (count == 0) continue;
+        interest = try connector.advance(fds[0].revents & c.POLL.IN != 0);
+        if (interest.ready) return connector.conn;
     }
     return error.DatabaseConnectTimeout;
 }
@@ -72,42 +133,16 @@ fn statementName(route: http.Route, read: ?articles.Read) [:0]const u8 {
     return if (r.phase == .page) pages[@backingInt(r.family)] else counts[@backingInt(r.family)];
 }
 
-fn prepareQueries(conn: *Conn, io: std.Io, deadline: i64) !void {
-    // Startup only: every name belongs to this PGconn and dies with it. PostgreSQL
-    // keeps its default generic/custom-plan heuristic; no data or auth is cached.
-    for ([_]http.Route{ .tags, .register, .login, .current, .update, .profile, .follow, .unfollow }) |route| {
-        try prepare(conn, statementName(route, null), querySql(route, null), io, deadline);
-    }
-    for (std.enums.values(articles.Family)) |family| {
-        var read: articles.Read = .{ .family = family };
-        try prepare(conn, statementName(.articles, read), read.statement(), io, deadline);
-        if (family != .single) {
-            read.phase = .count;
-            try prepare(conn, statementName(.articles, read), read.statement(), io, deadline);
-        }
-    }
-}
-
-fn prepare(conn: *Conn, name: [:0]const u8, sql: [:0]const u8, io: std.Io, deadline: i64) !void {
-    if (PQsendPrepare(conn, name.ptr, sql.ptr, 0, null) != 1) return error.DatabasePrepare;
-    var successful = false;
-    var failed = false;
-    while (std.Io.Clock.awake.now(io).toMilliseconds() < deadline) {
-        const flush = PQflush(conn);
-        if (flush < 0 or PQconsumeInput(conn) != 1) return error.DatabasePrepare;
-        while (PQisBusy(conn) == 0) {
-            const result = PQgetResult(conn) orelse {
-                if (!successful or failed or PQtransactionStatus(conn) != 0) return error.DatabasePrepare;
-                return;
-            };
-            if (PQresultStatus(result) == 1) successful = true else failed = true;
-            PQclear(result);
-        }
-        var fds = [_]c.pollfd{.{ .fd = PQsocket(conn), .events = c.POLL.IN | @as(i16, if (flush == 1) c.POLL.OUT else 0), .revents = 0 }};
-        if (fds[0].fd < 0) return error.DatabasePrepare;
-        if (c.poll(&fds, 1, 100) < 0 and c.errno(@as(c_int, -1)) != .INTR) return error.DatabasePoll;
-    }
-    return error.DatabasePrepareTimeout;
+fn prepareItem(index: usize) ?struct { name: [:0]const u8, sql: [:0]const u8 } {
+    const routes = [_]http.Route{ .tags, .register, .login, .current, .update, .profile, .follow, .unfollow };
+    if (index < routes.len) return .{ .name = statementName(routes[index], null), .sql = querySql(routes[index], null) };
+    const offset = index - routes.len;
+    if (offset >= 11) return null;
+    const read: articles.Read = .{
+        .family = @fromBackingInt(@intCast(if (offset < 6) offset else offset - 6)),
+        .phase = if (offset < 6) .page else .count,
+    };
+    return .{ .name = statementName(.articles, read), .sql = read.statement() };
 }
 
 pub fn query(conn: *Conn, route: http.Route, params: []const ?[:0]const u8, read: ?articles.Read) !void {

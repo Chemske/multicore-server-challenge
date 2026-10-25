@@ -106,12 +106,17 @@ with Server(results, secret, 'writes', 'focus', submission / 'zig-out/bin/condui
     author = zig.fixture('m5_author')
     other = zig.fixture('m5_other')
     token, other_token = mint(author, secret), mint(other, secret)
+    connection_count = int(sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{zig.database}' AND usename='conduit'"))
+    assert connection_count >= 1
 
     def create(title, tags=None):
         return zig.request('POST', '/api/articles', token, payload(title, tags))
 
     def idle():
-        assert sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{zig.database}' AND usename='conduit' AND state='idle' AND xact_start IS NULL") == '1'
+        deadline = time.monotonic() + 3
+        while sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{zig.database}' AND usename='conduit' AND state='idle' AND xact_start IS NULL") != str(connection_count):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
 
     special = ['m5,a', 'm5"b', 'm5\\c', 'm5 space', 'NULL', 'é']
     status, result = create('m5 Élan -- "你好" / PING', special + special)
@@ -239,7 +244,10 @@ with Server(results, secret, 'writes', 'focus', submission / 'zig-out/bin/condui
             wait_for_lock(zig)
             client.close()
             assert zig.request('GET', '/api/tags')[0] == 200
-            assert zig.sql("SELECT count(*) FROM articles WHERE title='m5 disconnected write'") == '1'
+            deadline = time.monotonic() + 3
+            while zig.sql("SELECT count(*) FROM articles WHERE title='m5 disconnected write'") != '1':
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
         finally:
             client.close()
     idle()
@@ -269,8 +277,15 @@ with Server(results, secret, 'writes', 'focus', submission / 'zig-out/bin/condui
         assert future.result(timeout=5)[0] == 503
     assert zig.sql("SELECT count(*) FROM articles WHERE title='m5 lost transaction'") == '0'
     assert zig.sql("SELECT count(*) FROM tags WHERE name='m5_lost_tag'") == '0'
-    assert zig.request('GET', '/api/tags')[0] == 503
-    assert create('m5 no automatic replay')[0] == 503
+    deadline = time.monotonic() + 10
+    while True:
+        status = zig.request('GET', '/api/tags')[0]
+        if status == 200:
+            break
+        assert status == 503 and time.monotonic() < deadline
+        time.sleep(0.03)
+    assert create('m5 request after recovery')[0] == 201
+    assert zig.sql("SELECT count(*) FROM articles WHERE title='m5 lost transaction'") == '0'
     passed('backend loss rolls back the open transaction, returns 503 and never automatically replays a write')
 
     assert zig.process.poll() is None

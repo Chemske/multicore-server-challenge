@@ -1,4 +1,4 @@
-"""Compare two builds with the unchanged load generator on fresh dev clones.
+"""Compare builds with the unchanged load generator on fresh dev clones.
 
 This is a local experiment, not the official capacity search. The generator,
 application and PostgreSQL share the Mac. No failed requests are filtered out.
@@ -26,6 +26,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--control', type=Path, required=True)
     parser.add_argument('--candidate', type=Path, required=True)
+    parser.add_argument('--third', type=Path, help='optional third build, selected as C in --order')
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--order', default='ABBABA')
     parser.add_argument('--users', type=int, default=128)
@@ -33,20 +34,23 @@ def main():
     parser.add_argument('--ramp', default='10s')
     parser.add_argument('--measure', default='30s')
     args = parser.parse_args()
-    if not args.order or set(args.order) - {'A', 'B'}:
-        parser.error('--order must contain only A (control) and B (candidate)')
+    labels = {'A', 'B', 'C'} if args.third else {'A', 'B'}
+    if not args.order or set(args.order) - labels:
+        parser.error('--order must select A, B, or C when --third is supplied')
     if not 0 < args.users < 256:
         parser.error('this experiment stays below the current 256-client limit')
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
     builds = {'A': args.control.resolve(), 'B': args.candidate.resolve()}
+    if args.third:
+        builds['C'] = args.third.resolve()
     loadgen = Path(os.environ['CHALLENGE_WORK']) / 'tools/loadgen'
     report = {
         'started_at_utc': datetime.now(timezone.utc).isoformat(),
         'scope': 'native Mac, development seed, co-located load generator; not an official score',
         'platform': platform.platform(), 'cpu_count': os.cpu_count(),
         'seed_counts': sql('SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM articles)', 'conduit_dev'),
-        'settings': {key: value for key, value in vars(args).items() if key not in ('control', 'candidate', 'out')},
+        'settings': {key: value for key, value in vars(args).items() if key not in ('control', 'candidate', 'third', 'out')},
         'binaries': {label: {'path': str(path), 'sha256': fingerprint(path)} for label, path in builds.items()},
         'loadgen_sha256': fingerprint(loadgen),
         'harness_sha256': fingerprint(Path(__file__).resolve()),
@@ -80,13 +84,17 @@ def main():
                       f"LG-limited={result['verdict']['lg_limited']}", flush=True)
             summary.write_text(json.dumps(report, indent=2) + '\n')
         report['medians'] = {}
-        for label in ('A', 'B'):
+        for label in builds:
             runs = [run['overall'] for run in report['runs'] if run['build'] == label]
             if runs:
                 report['medians'][label] = {field: statistics.median(run[field] for run in runs)
                                             for field in ('rps', 'p95_ms', 'p99_ms', 'error_rate')}
         if all(label in report['medians'] for label in ('A', 'B')):
             report['median_rps_change_pct'] = 100 * (report['medians']['B']['rps'] / report['medians']['A']['rps'] - 1)
+        if 'A' in report['medians']:
+            report['median_rps_change_vs_control_pct'] = {
+                label: 100 * (stats['rps'] / report['medians']['A']['rps'] - 1)
+                for label, stats in report['medians'].items() if label != 'A'}
         report['all_runs_zero_errors_and_no_reported_generator_limit'] = all(
             run['overall']['errors'] == 0 and not run['verdict']['lg_limited'] for run in report['runs'])
         report['completed'] = True

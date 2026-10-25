@@ -8,10 +8,21 @@ const bcrypt = @import("bcrypt_pool.zig");
 
 const max_clients = 256;
 const max_input = http.max_head + http.max_body + 4096;
-const database_token = 0;
+const database_bit: u64 = 1 << 31;
+const database_connections = @import("build_options").database_connections;
 const listener_token = 1;
 const worker_token = 2;
-const State = enum { closed, reading, queued, hashing, writing };
+const Database = struct {
+    connection: ?*pg.Conn = null,
+    opening: ?pg.Connector = null,
+    active: ?*requests.Task = null,
+    active_since: i64 = 0,
+    retry_at: i64 = 0,
+    retry_delay: i64 = 250,
+    generation: u32 = 1,
+    fd: c_int = -1,
+};
+const State = enum { closed, reading, queued, database, hashing, writing };
 const Client = struct {
     fd: c_int = -1,
     generation: u32 = 1,
@@ -30,13 +41,12 @@ const Server = struct {
     io: std.Io,
     loop: events.Loop,
     listener: c_int,
-    database: ?*pg.Conn,
+    databases: []Database,
+    database_url: [*:0]const u8,
     clients: []Client,
     pool: *bcrypt.Pool,
     secret: []const u8,
     sequence: u64 = 0,
-    active: ?*requests.Task = null,
-    active_since: i64 = 0,
 
     fn now(self: *Server) i64 {
         return std.Io.Clock.awake.now(self.io).toMilliseconds();
@@ -55,7 +65,7 @@ const Server = struct {
         if (client.fd < 0) return;
         if (client.task) |task| {
             // Active database work and bcrypt completions retain their own task lifetime.
-            if (client.state == .queued and self.active != task) task.destroy(self.allocator);
+            if (client.state == .queued) task.destroy(self.allocator);
         }
         _ = c.close(client.fd);
         client.input.deinit(self.allocator);
@@ -268,57 +278,113 @@ const Server = struct {
         if (client.input.items.len != 0) try self.processInput(index);
     }
 
-    fn databaseFailed(self: *Server) void {
-        if (self.database) |connection| pg.PQfinish(connection);
-        self.database = null;
-        if (self.active) |task| {
-            self.active = null;
-            // A lost write may have committed. Never replay it automatically.
+    fn watchDatabase(self: *Server, index: usize, read: bool, write: bool) !void {
+        const database = &self.databases[index];
+        const conn = database.connection orelse if (database.opening) |opening| opening.conn else return;
+        const fd = pg.PQsocket(conn);
+        if (fd < 0) return error.DatabaseSocket;
+        // libpq can change sockets during connection establishment. Old readiness
+        // events must not advance a replacement connection or a reused descriptor.
+        if (database.fd != fd) {
+            database.fd = fd;
+            database.generation +%= 1;
+        }
+        const tag = (@as(u64, database.generation) << 32) | database_bit | index;
+        try self.loop.watch(fd, tag, read, write);
+    }
+
+    fn databaseFailed(self: *Server, index: usize) void {
+        const database = &self.databases[index];
+        if (database.connection) |connection| pg.PQfinish(connection);
+        if (database.opening) |opening| pg.PQfinish(opening.conn);
+        database.connection = null;
+        database.opening = null;
+        database.fd = -1;
+        database.generation +%= 1;
+        database.retry_at = self.now() + database.retry_delay;
+        database.retry_delay = @min(database.retry_delay * 2, 5_000);
+        if (database.active) |task| {
+            database.active = null;
+            // An uncertain write belongs to this failed connection, never the queue.
             self.finish(task, 503, "{\"errors\":{\"body\":[\"database unavailable\"]}}");
+        }
+    }
+
+    fn maintainDatabases(self: *Server, current: i64) void {
+        for (self.databases, 0..) |*database, index| {
+            if ((database.active != null and current - database.active_since > 8_000) or
+                (database.opening != null and current - database.active_since > 20_000))
+            {
+                self.databaseFailed(index);
+            } else if (database.connection == null and database.opening == null and current >= database.retry_at) {
+                database.opening = pg.Connector.start(self.database_url) catch {
+                    self.databaseFailed(index);
+                    continue;
+                };
+                database.active_since = current;
+                self.watchDatabase(index, false, true) catch self.databaseFailed(index);
+            }
         }
     }
 
     fn isLive(self: *Server, task: *requests.Task) bool {
         const client = self.clients[task.recipient.index];
-        return (client.state == .queued or client.state == .hashing) and
+        return (client.state == .queued or client.state == .database or client.state == .hashing) and
             client.generation == task.recipient.generation and client.task == task;
     }
 
-    fn databaseReady(self: *Server, readable: bool) !void {
-        const connection = self.database orelse return;
+    fn databaseReady(self: *Server, index: usize, readable: bool) !void {
+        const database = &self.databases[index];
+        if (database.opening) |*opening| {
+            const interest = opening.advance(readable) catch {
+                self.databaseFailed(index);
+                return;
+            };
+            if (interest.ready) {
+                database.connection = opening.conn;
+                database.opening = null;
+                database.retry_delay = 250;
+                self.watchDatabase(index, true, false) catch self.databaseFailed(index);
+            } else self.watchDatabase(index, interest.read, interest.write) catch self.databaseFailed(index);
+            return;
+        }
+        const connection = database.connection orelse return;
         if (readable and pg.PQconsumeInput(connection) != 1) {
-            self.databaseFailed();
+            self.databaseFailed(index);
             return;
         }
         const flush = pg.PQflush(connection);
         if (flush < 0) {
-            self.databaseFailed();
+            self.databaseFailed(index);
             return;
         }
-        try self.loop.watch(pg.PQsocket(connection), database_token, true, flush == 1);
-        while (self.active != null and pg.PQisBusy(connection) == 0) {
-            const task = self.active.?;
+        self.watchDatabase(index, true, flush == 1) catch {
+            self.databaseFailed(index);
+            return;
+        };
+        while (database.active != null and pg.PQisBusy(connection) == 0) {
+            const task = database.active.?;
             const result = pg.PQgetResult(connection) orelse {
                 // The statement is fully drained, including its transaction completion.
                 if (task.operation) |*operation| {
                     if ((operation.stage == .commit or operation.stage == .rollback) and pg.PQtransactionStatus(connection) != 0) {
-                        self.databaseFailed();
+                        self.databaseFailed(index);
                         return;
                     }
                     if (operation.stage == .rollback and task.status != 200) {
-                        self.databaseFailed();
+                        self.databaseFailed(index);
                         return;
                     }
                     if (operation.stage == .commit and task.status != 200) operation.transaction = false;
                     // Keep transaction ownership even when the HTTP recipient has gone away.
                     if (operation.advance(task.status)) {
                         task.status = 503;
-                        self.active_since = self.now();
+                        database.active_since = self.now();
                         task.send(connection) catch {
-                            self.databaseFailed();
+                            self.databaseFailed(index);
                             return;
                         };
-                        try self.databaseReady(false);
+                        try self.databaseReady(index, false);
                         return;
                     }
                     task.status = if (operation.http_status >= 400) operation.http_status else 200;
@@ -328,17 +394,17 @@ const Server = struct {
                         if (read.family != .single and read.phase == .page) {
                             read.phase = .count;
                             task.status = 503;
-                            self.active_since = self.now();
+                            database.active_since = self.now();
                             task.send(connection) catch {
-                                self.databaseFailed();
+                                self.databaseFailed(index);
                                 return;
                             };
-                            try self.databaseReady(false);
+                            try self.databaseReady(index, false);
                             return;
                         }
                     }
                 }
-                self.active = null;
+                database.active = null;
                 if (!self.isLive(task)) {
                     task.destroy(self.allocator);
                 } else if (task.status != 200) {
@@ -408,30 +474,38 @@ const Server = struct {
     }
 
     fn dispatch(self: *Server) !void {
-        if (self.active != null) return;
-        var oldest: ?usize = null;
-        for (self.clients, 0..) |client, index| {
-            if (client.state == .queued and (oldest == null or client.sequence < self.clients[oldest.?].sequence)) oldest = index;
+        for (0..64) |_| {
+            var oldest: ?usize = null;
+            for (self.clients, 0..) |client, index| {
+                if (client.state == .queued and (oldest == null or client.sequence < self.clients[oldest.?].sequence)) oldest = index;
+            }
+            const index = oldest orelse return;
+            const task = self.clients[index].task.?;
+            const slot = for (self.databases, 0..) |database, i| {
+                if (database.connection != null and database.active == null) break i;
+            } else {
+                // Wait only for ready, occupied owners. An entirely unavailable
+                // database fails unsent work promptly instead of hiding a backlog.
+                for (self.databases) |database| if (database.connection != null) return;
+                self.finish(task, 503, "{\"errors\":{\"body\":[\"database unavailable\"]}}");
+                continue;
+            };
+            const database = &self.databases[slot];
+            self.clients[index].state = .database;
+            database.active = task;
+            database.active_since = self.now();
+            task.send(database.connection.?) catch {
+                self.databaseFailed(slot);
+                continue;
+            };
+            try self.databaseReady(slot, false);
         }
-        const index = oldest orelse return;
-        const task = self.clients[index].task.?;
-        const connection = self.database orelse {
-            self.finish(task, 503, "{\"errors\":{\"body\":[\"database unavailable\"]}}");
-            return;
-        };
-        self.active = task;
-        self.active_since = self.now();
-        task.send(connection) catch {
-            self.databaseFailed();
-            return;
-        };
-        try self.databaseReady(false);
     }
 
     fn run(self: *Server) !void {
         try self.loop.watch(self.listener, listener_token, true, false);
         try self.loop.watch(self.pool.pipe[0], worker_token, true, false);
-        try self.loop.watch(pg.PQsocket(self.database.?), database_token, true, false);
+        for (0..self.databases.len) |index| try self.watchDatabase(index, true, false);
         var ready: [128]events.Event = undefined;
         while (true) {
             const count = try self.loop.wait(&ready);
@@ -440,8 +514,11 @@ const Server = struct {
                     try self.acceptClients();
                     continue;
                 }
-                if (event.token == database_token) {
-                    if (event.failed) self.databaseFailed() else try self.databaseReady(event.readable);
+                if (event.token & database_bit != 0) {
+                    const index: usize = @as(u32, @truncate(event.token)) & ~@as(u32, @intCast(database_bit));
+                    if (index < self.databases.len and self.databases[index].generation == event.token >> 32) {
+                        if (event.failed) self.databaseFailed(index) else try self.databaseReady(index, event.readable);
+                    }
                     continue;
                 }
                 if (event.token == worker_token) {
@@ -466,7 +543,7 @@ const Server = struct {
                 const limit: i64 = if (client.state == .reading and client.input.items.len == 0) 70_000 else 9_000;
                 if (client.state != .closed and current - client.last_activity > limit) self.closeClient(index);
             }
-            if (self.active != null and current - self.active_since > 8_000) self.databaseFailed();
+            self.maintainDatabases(current);
             try self.dispatch();
         }
     }
@@ -512,24 +589,32 @@ pub fn main(init: std.process.Init) !void {
             task.destroy(allocator);
         }
     }
+    var databases: [database_connections]Database = @splat(.{});
+    defer for (&databases) |*database| {
+        if (database.connection) |connection| pg.PQfinish(connection);
+        if (database.opening) |opening| pg.PQfinish(opening.conn);
+        if (database.active) |task| task.destroy(allocator);
+    };
+    for (&databases) |*database| database.connection = try pg.connect(url, init.io);
+    var loop = try events.Loop.init();
+    defer loop.deinit();
+    const listener = try listen(host, port);
+    defer _ = c.close(listener);
     var server: Server = .{
         .allocator = allocator,
         .io = init.io,
-        .loop = try events.Loop.init(),
-        .listener = try listen(host, port),
-        .database = try pg.connect(url, init.io),
+        .loop = loop,
+        .listener = listener,
+        .databases = &databases,
+        .database_url = url,
         .clients = clients,
         .pool = &pool,
         .secret = secret,
     };
-    defer server.loop.deinit();
-    defer _ = c.close(server.listener);
-    defer if (server.database) |connection| pg.PQfinish(connection);
     defer {
         for (0..clients.len) |index| server.closeClient(index);
-        if (server.active) |task| task.destroy(allocator);
     }
-    std.log.info("all API routes on {s}:{d}; one database connection, two bcrypt workers, prepared API queries: {}", .{ host, port, pg.prepared_queries });
+    std.log.info("all API routes on {s}:{d}; {d} database connections, two bcrypt workers, prepared API queries: {}", .{ host, port, database_connections, pg.prepared_queries });
     try server.run();
 }
 
