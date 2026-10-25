@@ -193,10 +193,47 @@
   },
   "median_rps_change_pct": 17.26362649060742,
   "limitations": [
+    "Two active VM processes were subsequently observed; elapsed process times place their startup after the first control run. The comparison is confounded and does not establish a throughput gain caused by the code.",
     "Background activity and thermal/memory drift; large run-to-run variation.",
     "Not every adjacent comparison improves; median p99 worsens.",
     "All HTTP 503s remain counted; the errors are not filtered.",
     "Host-wide generator CPU sampling is unavailable on macOS.",
     "Changes are not compounded with earlier experiments."
-  ]
+  ],
+  "release_hold_8000": {
+    "settings": {
+      "order": "B",
+      "users": 8000,
+      "think_scale": 1.0,
+      "ramp": "30s",
+      "measure": "300s",
+      "tail": "15s",
+      "template": "conduit_seed"
+    },
+    "release_sha256": "f67e073f6aad770eeecbc26eb4abfcbbb554fb1760d62a5d2fa12858d47b140b",
+    "overall": {
+      "count": 562572,
+      "rps": 1875.24,
+      "p50_ms": 77.567,
+      "p90_ms": 1473.535,
+      "p95_ms": 2127.871,
+      "p99_ms": 3901.439,
+      "max_ms": 8740.863,
+      "mean_ms": 489.65419203408584,
+      "errors": 54987,
+      "error_rate": 0.09774215567074081,
+      "statuses": {
+        "200": 498164,
+        "201": 9153,
+        "204": 268,
+        "503": 54987
+      },
+      "error_classes": {
+        "http_503": 54987
+      }
+    },
+    "reported_lg_limited": false,
+    "passes_thresholds": false,
+    "environment_observation": "Two active preexisting VMware VM processes; 5295 MiB swap used. Not an isolated host. No causal code-only throughput inference."
+  }
 }

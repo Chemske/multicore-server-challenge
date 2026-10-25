@@ -24,6 +24,6 @@ This validates a real Linux/epoll runtime and the OpenSSL-enabled libpq installe
 
 ## Performance and scope
 
-The final article-group comparison, including every error, binary fingerprints, drift and worse median p99, is recorded in PERFORMANCE.md and benchmarks/results/article-groups.json. Local tests never establish an official user score. The organiser's full-seed capacity search and five-minute hold with separate generators remain authoritative.
+The article-group comparison, including its subsequently discovered VM contention, every error, binary fingerprints and worse median p99, is recorded in PERFORMANCE.md and benchmarks/results/article-groups.json. The release's latest 8,000-user native hold fails (p95 2,127.871 ms, p99 3,901.439 ms, 9.774% HTTP 503s) while two existing VM workloads and substantial swap share the Mac. The complete result is retained. Local tests never establish an official user score. The organiser's full-seed capacity search and five-minute hold with separate generators remain authoritative.
 
 The submission adds only its own directory. It includes source, pinned dependencies, build/install/start scripts, tests and English documentation. No build products or caches are committed. Authorship uses the public Chemske identity; source attribution is preserved.

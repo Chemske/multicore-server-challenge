@@ -91,6 +91,8 @@ The configured client ceiling is 131,072, reduced to existing descriptor limits 
 
 ## Evidence
 
+The latest 8,000-user native release hold fails the latency/error targets while two existing VM workloads share the Mac. The A/B session is also confounded by their startup. These results are retained and do not support an official capacity or isolated throughput-gain claim.
+
 [VALIDATION.md](docs/VALIDATION.md) records the final correctness, fault and Ubuntu checks.
 
 [PERFORMANCE.md](docs/PERFORMANCE.md) records separate, reproducible local comparisons with raw errors and hardware limitations. Short Mac runs use the unchanged generator with accelerated think/session times and share CPU with PostgreSQL; they cannot be converted into official user counts or added together as cumulative speedups.
