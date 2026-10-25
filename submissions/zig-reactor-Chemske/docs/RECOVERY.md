@@ -1,6 +1,6 @@
 # Database ownership and recovery
 
-Each database slot has one connection, one active primary request, an optional bounded tags group and its own generation, deadline and retry state. All sockets, connection setup and query progress remain owned by the reactor thread. Bcrypt workers never touch a database connection.
+Each database slot has one connection, one active primary request, an optional bounded read group and its own generation, deadline and retry state. All sockets, connection setup and query progress remain owned by the reactor thread. Bcrypt workers never touch a database connection.
 
 `-Ddb-connections=N` selects a fixed pool at build time, with a checked range of 1–95. This does not create an unbounded pool or a thread per connection. Requests remain in the bounded HTTP client set until an idle owner is available. The oldest queued request is dispatched first. A slot stays exclusive through every query stage, transaction completion and rollback; another request cannot borrow it mid-operation.
 
@@ -17,7 +17,7 @@ Active database work has its own client state. A disconnected or expired client 
 
 Retired slots reconnect independently, starting after 250 ms with exponential backoff capped at five seconds. The existing event-loop tick can add scheduling delay when the process is otherwise idle. Each slot owns at most one attempt, with a twenty-second setup deadline. A completed replacement resets its backoff.
 
-`PQconnectStart`/`PQconnectPoll`, parameterized setup and all twenty named preparations advance from socket readiness. A replacement is admitted only after all results have been drained and the connection is idle. No startup/session state is inherited from the lost connection. The official numeric loopback database address avoids libpq's potentially blocking hostname resolution; this design does not promise asynchronous DNS for arbitrary URLs.
+`PQconnectStart`/`PQconnectPoll`, parameterized setup and all twenty-one named preparations advance from socket readiness. A replacement is admitted only after all results have been drained and the connection is idle. No startup/session state is inherited from the lost connection. The official numeric loopback database address avoids libpq's potentially blocking hostname resolution; this design does not promise asynchronous DNS for arbitrary URLs.
 
 Each owned session sets `statement_timeout` to eight seconds. This matches the existing application query deadline and bounds abandoned backend work as well as waiting in the application. It changes only that session, with no schema, database, role or server-wide configuration change. Durable commit settings stay untouched. Setup also drains session-only `jit=off` and the selected `plan_cache_mode`; the automatic-plan control remains available. See PERFORMANCE.md for the measurements.
 
@@ -33,4 +33,4 @@ The checks cover rebuilt statements/settings, isolated backend loss, bounded rec
 
 The proxy, application and disposable databases are stopped/removed on exit. All logs and JSON evidence stay under `work/results/recovery/`. No extra software, service or external infrastructure is installed.
 
-The final optimisation round also counts all twenty preparations and all three session settings after replacement. Coalesced tags recipients receive the same drained success/error, or 503 on connection retirement; none are returned to the pending queue.
+The final optimisation round also counts all twenty-one preparations and all three session settings after replacement. Grouped read recipients receive the same drained success/error, or 503 on connection retirement; none are returned to the pending queue.

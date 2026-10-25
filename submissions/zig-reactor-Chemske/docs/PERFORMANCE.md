@@ -159,6 +159,7 @@ The selected defaults are ReleaseFast, prepared queries, forced generic plans, s
 | Prepared statements | `-Dprepared-queries=true` | `false` |
 | Plan selection | `-Dgeneric-plans=true` | `false` for PostgreSQL auto |
 | Queued tags groups | `-Dtag-batch=true` | `false` |
+| Queued single-article groups | `-Darticle-batch=true` | `false` |
 | Database owners | `-Ddb-connections=4` | 1–95 |
 | Bcrypt workers | `-Dbcrypt-workers=4` | 1–8 |
 | Outstanding bcrypt jobs | `-Dbcrypt-jobs=64` | 16–128 |
@@ -213,4 +214,25 @@ Observed normal demand is 0.265383 requests/s/user. Dividing the accelerated hol
 
 ## Final-check requirements
 
-Clean Ubuntu installation/runtime, epoll progress, target descriptor handling and an organiser-run capacity hold remain required. The five-minute native full-seed hold is still a co-located, accelerated experiment, not official capacity. A real leaderboard score requires the organiser's unchanged workload and separate load generators.
+Clean Ubuntu 24.04 x86_64 installation, linked runtime and epoll request progress now pass in the unchanged upstream CI workflow. Target high-connection capacity and an organiser-run hold remain unmeasured. The five-minute native full-seed hold is still a co-located, accelerated experiment, not official capacity. A real leaderboard score requires the organiser's unchanged workload and separate load generators.
+
+## Submission round: queued single-article reads
+
+The final read optimisation batches up to 32 already queued single-article requests. Each request carries its own viewer and slug in typed PostgreSQL arrays and receives its own ordinal, flags and missing-article status. The statement enriches each distinct slug once. It adds no collection delay and retains no data after the closed group. Isolated reads keep the original one-article query. Page/count ordering and the durable mutation path are unchanged. A wire-level regression serves 64 mixed authenticated/anonymous/missing reads in two queries, checks array escaping, verifies a fresh external update on a later request and drains 64 SQL failures without poisoning the owners.
+
+The control disables only `article-batch`; both builds have the same 21 preparations, four owners, four bcrypt workers, 64 outstanding jobs, ReleaseFast and generic plans. The unchanged generator uses fresh full-seed clones, 512 users, think-scale 0.005, ten-second ramps, thirty-second measurement windows and three-second tails in A-B-B-A-B-A order. No heavy builds or other test suites run during measurement. Existing Mac background work remains active; the machine also shows substantial swap use.
+
+| Run | Article groups | Requests/s | p95 ms | p99 ms | Errors / requests |
+|---|---|---:|---:|---:|---:|
+| 01-A | off | 3,784.8 | 220.287 | 526.335 | 465 / 113,543 |
+| 02-B | on | 3,635.1 | 195.455 | 752.127 | 430 / 109,054 |
+| 03-B | on | 3,767.7 | 199.679 | 272.127 | 499 / 113,030 |
+| 04-A | off | 2,986.6 | 238.079 | 987.135 | 605 / 89,598 |
+| 05-B | on | 2,878.6 | 235.647 | 605.183 | 683 / 86,359 |
+| 06-A | off | 3,100.0 | 259.839 | 489.471 | 488 / 92,999 |
+
+Median throughput is 3,100.0 versus 3,635.1 requests/s (+17.3%), and median per-run p95 is 238.079 versus 199.679 ms. Median p99 increases from 526.335 to 605.183 ms. Median error rates are 0.525% and 0.441%; these are overload responses, not an error-free run. Not every adjacent pair improves, and substantial downward drift prevents treating +17.3% as a stable target-machine speedup. This session's rates must not be compared to earlier, less busy Mac sessions as an implementation regression or gain. The generator reports no limiting flag, but macOS host CPU sampling is unavailable.
+
+A separate read-only full-seed EXPLAIN diagnostic uses forced generic plans, session JIT off, one warm-up and six measured repetitions. For 8 distinct articles, summed single-query planning/execution is 0.9935 ms versus 0.5585 ms for one group; for 32 it is 5.3240 versus 1.5525 ms. For repeated slugs, groups of 8/32 are also cheaper. Two repeated-slug reads can cost more (0.1990 versus 0.2265 ms), so batching is not a universal per-query win. These timings exclude network/HTTP cost and remain local diagnostics. Reduced execution count, the larger-group SQL savings and the mixed-workload result support retaining the bounded option; they do not establish leaderboard capacity.
+
+Sanitized aggregate results and binary fingerprints are in [article-groups.json](../benchmarks/results/article-groups.json). Complete local transcripts, endpoint distributions and query plans remain under `work/experiments/submission/`, outside Git. The final release is rebuilt from the same behaviour with the option enabled by default; final validation is listed in [VALIDATION.md](VALIDATION.md).

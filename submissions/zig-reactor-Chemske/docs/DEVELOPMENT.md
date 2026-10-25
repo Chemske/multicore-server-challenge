@@ -57,7 +57,7 @@ bash seed/make-seed.sh
 TEMPLATE=conduit_seed bash test/run.sh submissions/zig-reactor-Chemske
 ```
 
-Both development- and full-seed conformance now pass for the complete Zig API. Local full-seed comparisons are documented in PERFORMANCE.md; Linux runtime validation and official capacity remain outstanding. The milestone tests run the unchanged suite; older result files preserve their checkpoint failures. Seed creation replaces the named seed database, so it belongs in the dedicated project cluster. The dev helper preserves an existing seed instead of replacing it. Test/run creates and removes a temporary database. Load tests need separate disposable copies because they mutate data. Local development-seed load runs use 10,000 seeded articles rather than the full-data default.
+Both development- and full-seed conformance now pass for the complete Zig API. Local full-seed comparisons are documented in PERFORMANCE.md; Clean Ubuntu x86_64 installation and conformance also pass; official capacity remains unmeasured. The milestone tests run the unchanged suite; older result files preserve their checkpoint failures. Seed creation replaces the named seed database, so it belongs in the dedicated project cluster. The dev helper preserves an existing seed instead of replacing it. Test/run creates and removes a temporary database. Load tests need separate disposable copies because they mutate data. Local development-seed load runs use 10,000 seeded articles rather than the full-data default.
 
 The Mac's six cores and 8 GiB RAM cannot reproduce the official Linux target. Keep local load within host limits, monitor generator saturation and memory pressure, and never label local capacity as an official score. Linux CI is a required compatibility check; the organiser's benchmark determines the ranking. No remote server has been rented. BENCHMARKING.md describes an optional short-lived Oracle x86 test requested during the final optimisation round; no cloud resource is created without selecting that next step.
 
@@ -104,7 +104,7 @@ Milestone 6 adds a build-time database pool size and readiness-driven replacemen
 
 All proposed submission files stay under submissions/zig-reactor-Chemske. Shared challenge files remain unchanged. Documentation is in English and distinguishes intended behaviour from verified behaviour. Reused source keeps its licence and attribution; no invented benchmark or test result belongs in the README.
 
-The existing remote branch name zig-httpz-chemske reflects an earlier candidate and does not describe the selected reactor design. It can be renamed before submission; no PR is being opened during research.
+The existing remote branch name zig-httpz-chemske reflects an earlier candidate and does not describe the selected reactor design. The submission folder and README identify the selected reactor stack; the historical branch name does not affect builds.
 
 ## Final optimisation round: full data and connection scheduling
 
@@ -123,3 +123,5 @@ For cleanup after the final review, stop the interactive server and dedicated Po
 A further cross-link proof built PostgreSQL 18.6's client library and the server for x86_64 Linux using the existing Zig compiler on macOS. The results are ELF executable/shared-library files under `work/experiments/final-round/linux-cross/`. This installs no Linux tool or application on the Mac and executes no Linux code. The proof disables TLS/optional client features and uses a private cross-build prefix; it does not validate the Ubuntu installer's OpenSSL-enabled client or runtime search paths. The Ubuntu installer still needs an actual Linux run.
 
 At the end of this round, generated `work/` data occupies about 4.8 GiB, including about 3.2 GiB for the dedicated PostgreSQL cluster (the full seed, development/interactive databases and retained WAL). All load-test databases and temporary servers are removed after their runs. The final source remains under this submission folder; compiled executables, query plans and benchmark histograms are not committed. Keep the full template for the last Ubuntu/review step, then stop project processes before deleting generated data. No new Mac application or system service was installed in this round.
+
+The final submission recheck still passes all 197 Zig full-seed steps. Two Go reference attempts time out on `offset=100000000`; their other 196 responses match Zig exactly. The strict optional full-reference helper keeps that failure visible. See VALIDATION.md for the final evidence and use the unchanged official runner to test the submission independently.

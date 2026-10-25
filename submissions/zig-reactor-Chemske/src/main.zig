@@ -7,6 +7,7 @@ const requests = @import("requests.zig");
 const bcrypt = @import("bcrypt_pool.zig");
 
 const scheduling = @import("scheduler.zig");
+const read_batch = @import("read_batch.zig");
 const max_clients = @import("build_options").max_clients;
 const max_tasks = 2048;
 const max_input_bytes = 32 * 1024 * 1024;
@@ -25,8 +26,9 @@ const Database = struct {
     retry_delay: i64 = 250,
     generation: u32 = 1,
     fd: c_int = -1,
-    tag_requests: [31]?*requests.Task = @splat(null),
-    tag_count: usize = 0,
+    followers: [31]?*requests.Task = @splat(null),
+    follower_count: usize = 0,
+    article_group: bool = false,
 };
 const State = enum { closed, reading, queued, database, hashing, writing };
 const Client = struct {
@@ -342,7 +344,7 @@ const Server = struct {
         database.generation +%= 1;
         database.retry_at = self.now() + database.retry_delay;
         database.retry_delay = @min(database.retry_delay * 2, 5_000);
-        self.finishTagRequests(database, 503, "{\"errors\":{\"body\":[\"database unavailable\"]}}");
+        self.finishReadFollowers(database, 503, "{\"errors\":{\"body\":[\"database unavailable\"]}}");
         if (database.active) |task| {
             database.active = null;
             // An uncertain write belongs to this failed connection, never the queue.
@@ -350,10 +352,44 @@ const Server = struct {
         }
     }
 
-    fn finishTagRequests(self: *Server, database: *Database, status: u16, body: []const u8) void {
-        const count = database.tag_count;
-        database.tag_count = 0;
-        for (database.tag_requests[0..count]) |task| self.finish(task.?, status, body);
+    fn finishReadFollowers(self: *Server, database: *Database, status: u16, body: []const u8) void {
+        const count = database.follower_count;
+        database.follower_count = 0;
+        database.article_group = false;
+        for (database.followers[0..count]) |task| self.finish(task.?, status, body);
+    }
+
+    fn finishArticle(self: *Server, task: *requests.Task) void {
+        if (!self.isLive(task)) {
+            self.releaseTask(task);
+        } else if (task.status != 200) {
+            self.finish(task, task.status, "{\"errors\":{\"body\":[\"query failed\"]}}");
+        } else {
+            const body = task.read.?.json(task.arena.allocator()) catch {
+                self.finish(task, 503, "{\"errors\":{\"body\":[\"article response unavailable\"]}}");
+                return;
+            };
+            self.finish(task, 200, body);
+        }
+    }
+
+    fn articleGroupResult(self: *Server, database: *Database, result: *pg.Result) void {
+        _ = self;
+        var members: [read_batch.capacity]*requests.Task = undefined;
+        members[0] = database.active.?;
+        for (database.followers[0..database.follower_count], 1..) |task, index| members[index] = task.?;
+        const group = members[0 .. database.follower_count + 1];
+        pg.checkSingleBatch(result, group.len) catch {
+            for (group) |task| task.status = 503;
+            return;
+        };
+        for (group, 0..) |task, index| {
+            task.read.?.rows = pg.singleBatchRow(result, index, task.arena.allocator()) catch {
+                task.status = 503;
+                continue;
+            };
+            task.status = if (task.read.?.rows.len == 0) 404 else 200;
+        }
     }
 
     fn maintainDatabases(self: *Server, current: i64) void {
@@ -412,6 +448,15 @@ const Server = struct {
             const task = database.active.?;
             const result = pg.PQgetResult(connection) orelse {
                 // The statement is fully drained, including its transaction completion.
+                if (database.article_group) {
+                    const count = database.follower_count;
+                    database.follower_count = 0;
+                    database.article_group = false;
+                    database.active = null;
+                    for (database.followers[0..count]) |other| self.finishArticle(other.?);
+                    self.finishArticle(task);
+                    return;
+                }
                 if (task.operation) |*operation| {
                     if ((operation.stage == .commit or operation.stage == .rollback) and pg.PQtransactionStatus(connection) != 0) {
                         self.databaseFailed(index);
@@ -451,7 +496,7 @@ const Server = struct {
                     }
                 }
                 database.active = null;
-                if (task.route == .tags) self.finishTagRequests(database, task.status, if (task.status == 200) task.body.? else "{\"errors\":{\"body\":[\"query failed\"]}}");
+                if (task.route == .tags) self.finishReadFollowers(database, task.status, if (task.status == 200) task.body.? else "{\"errors\":{\"body\":[\"query failed\"]}}");
                 if (!self.isLive(task)) {
                     self.releaseTask(task);
                 } else if (task.status != 200) {
@@ -486,6 +531,10 @@ const Server = struct {
                 return;
             };
             defer pg.PQclear(result);
+            if (database.article_group) {
+                self.articleGroupResult(database, result);
+                continue;
+            }
             task.status = pg.status(result);
             if (task.status != 200) continue;
             if (task.operation) |*operation| {
@@ -545,18 +594,48 @@ const Server = struct {
                 // is added after dispatch, and no returned data survives the group.
                 var next = self.scheduler.head;
                 for (0..64) |_| {
-                    if (next == scheduling.none or database.tag_count == database.tag_requests.len) break;
+                    if (next == scheduling.none or database.follower_count == database.followers.len) break;
                     const candidate = next;
                     next = self.scheduler.nodes[candidate].next;
                     const other = &self.clients[candidate];
                     if (other.task.?.route != .tags) continue;
                     self.scheduler.unqueue(candidate);
                     other.state = .database;
-                    database.tag_requests[database.tag_count] = other.task;
-                    database.tag_count += 1;
+                    database.followers[database.follower_count] = other.task;
+                    database.follower_count += 1;
                 }
             }
-            task.send(database.connection.?) catch {
+            if (@import("build_options").article_batch and task.route == .article) {
+                var inputs: [read_batch.capacity]read_batch.Input = undefined;
+                inputs[0] = .{ .viewer = task.params[0].?, .slug = task.params[1].? };
+                var bytes = inputs[0].viewer.len + inputs[0].slug.len;
+                var next = self.scheduler.head;
+                for (0..64) |_| {
+                    if (next == scheduling.none or database.follower_count == database.followers.len) break;
+                    const candidate = next;
+                    next = self.scheduler.nodes[candidate].next;
+                    const other = &self.clients[candidate];
+                    if (other.task.?.route != .article) continue;
+                    const input: read_batch.Input = .{ .viewer = other.task.?.params[0].?, .slug = other.task.?.params[1].? };
+                    if (bytes + input.viewer.len + input.slug.len > read_batch.max_parameter_bytes) break;
+                    bytes += input.viewer.len + input.slug.len;
+                    self.scheduler.unqueue(candidate);
+                    other.state = .database;
+                    database.followers[database.follower_count] = other.task;
+                    database.follower_count += 1;
+                    inputs[database.follower_count] = input;
+                }
+                if (database.follower_count != 0) {
+                    database.article_group = true;
+                    pg.sendSingleBatch(database.connection.?, inputs[0 .. database.follower_count + 1], task.arena.allocator()) catch {
+                        self.databaseFailed(slot);
+                        continue;
+                    };
+                } else task.send(database.connection.?) catch {
+                    self.databaseFailed(slot);
+                    continue;
+                };
+            } else task.send(database.connection.?) catch {
                 self.databaseFailed(slot);
                 continue;
             };
@@ -690,7 +769,7 @@ pub fn main(init: std.process.Init) !void {
         if (database.connection) |connection| pg.PQfinish(connection);
         if (database.opening) |opening| pg.PQfinish(opening.conn);
         if (database.active) |task| task.destroy(allocator);
-        for (database.tag_requests[0..database.tag_count]) |task| task.?.destroy(allocator);
+        for (database.followers[0..database.follower_count]) |task| task.?.destroy(allocator);
     };
     for (&databases) |*database| database.connection = try pg.connect(url, init.io);
     var loop = try events.Loop.init();
@@ -720,6 +799,7 @@ pub fn main(init: std.process.Init) !void {
 
 test {
     _ = scheduling;
+    _ = read_batch;
     _ = http;
     _ = @import("auth.zig");
     _ = bcrypt;

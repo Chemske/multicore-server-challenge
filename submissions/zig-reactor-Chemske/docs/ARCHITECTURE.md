@@ -1,6 +1,6 @@
 # Architecture
 
-I use one readiness-driven Zig reactor for HTTP and four independently progressing PostgreSQL owners. Bcrypt runs in a separate bounded worker pool. The same application uses kqueue on macOS and epoll on Linux; no thread is created per client. All API routes pass the unchanged conformance suite on both development and full seeds on the native Mac. Linux runtime validation remains outstanding.
+I use one readiness-driven Zig reactor for HTTP and four independently progressing PostgreSQL owners. Bcrypt runs in a separate bounded worker pool. The same application uses kqueue on macOS and epoll on Linux; no thread is created per client. All API routes pass the unchanged conformance suite on both development and full seeds on the native Mac. The clean Ubuntu 24.04 x86_64 installation and the unchanged 197-step suite also pass with PostgreSQL 18.
 
 ## Ownership and request flow
 
@@ -24,13 +24,15 @@ Picohttpparser parses headers; my layer owns framing, Content-Length/Transfer-En
 
 ## SQL and read groups
 
-Twenty fixed queries are prepared separately on each connection. The later mutation state machine retains parameterized single-query execution. Setup fully drains each session command and preparation before admitting the connection. Replacements rebuild this state. Session-only plan/JIT choices and their comparison controls are described in PERFORMANCE.md; no role, database or server-wide tuning is applied.
+Twenty-one fixed queries are prepared separately on each connection. The later mutation state machine retains parameterized single-query execution. Setup fully drains each session command and preparation before admitting the connection. Replacements rebuild this state. Session-only plan/JIT choices and their comparison controls are described in PERFORMANCE.md; no role, database or server-wide tuning is applied.
 
 Article lists select page IDs in descending order before enrichment, then issue a separate capped count. This retains the reference's page-then-count statement snapshots. Counts stop at 1,000 without hiding accessible pages beyond that offset. Filter precedence, nullable fields, viewer flags and UTC millisecond formatting are explicit. Every request reads current data from PostgreSQL.
 
 Comment lists use one prepared statement: article lookup plus a lateral newest-100 comment/author query. A leading article ID distinguishes a missing article (404) from an existing article without comments (200 with an empty list). The outer order explicitly preserves creation time and ID descending. Compared with the reference's separate lookup/read, this uses one statement snapshot; a simultaneous article deletion may therefore be observed differently. Ordinary API responses match the reference on both seeds.
 
 When the oldest queued task is a tags read, dispatch can gather up to 31 compatible reads from at most the next 64 already queued tasks. It executes one tags query for that closed group. Each recipient keeps its own connection, framing, deadline and lifetime. No collection delay is added, and no request can join after dispatch. Results are released when the group completes; a later request always executes a new query. The unbatched control remains available with `-Dtag-batch=false`.
+
+Single-article reads can use the same closed-group dispatch rule with up to 32 requests and 256 KiB of input parameters. Two typed PostgreSQL arrays carry each request's viewer and slug. A materialized query enriches each distinct article once and computes favourite/follow flags per request, returning an ordinal for exact response ownership. Missing slugs remain individual 404s. The ordinary single-read query is used when no compatible request is already queued. Array values escape quotes/backslashes and reject NUL. Each recipient retains at most 4 MiB of article fields; the aggregate HTTP output budget still applies. `-Darticle-batch=false` retains the comparison control.
 
 A group's reads share one PostgreSQL snapshot. Success/error is delivered to all captured recipients after the command is fully drained. Followers are finished before the primary task's response arena is released, including when the primary disconnects. A connection failure returns 503 to the group without replay. No result or rendered-response cache survives a group. Tests count actual wire executions, check post-dispatch freshness and inject SQL failure.
 
@@ -50,4 +52,4 @@ The bcrypt adapter normalizes only a corrected Go `$2a$10$` marker to Zig's `$2b
 
 Each failed owner reconnects independently with 250 ms–5 s exponential backoff. Healthy owners continue. Unsent work fails promptly if no usable database connection remains. The numeric loopback benchmark address avoids potentially blocking DNS inside libpq. See RECOVERY.md for the fault matrix and uncertain-commit proof.
 
-Source and native correctness checks do not validate epoll runtime, the Ubuntu installer, target descriptor limits or official capacity. Those are explicit final-check requirements. The source-built libpq and compiler installer target Ubuntu only and are never run on my Mac.
+The clean Ubuntu CI run validates the installer, linked Linux executable, epoll request progress and all official conformance steps. It does not establish 100,000 live Linux connections or official capacity; the organiser's benchmark remains required. The source-built libpq and compiler installer target Ubuntu only and are never run on my Mac.

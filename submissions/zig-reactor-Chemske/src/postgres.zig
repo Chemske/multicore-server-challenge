@@ -4,6 +4,7 @@ const http = @import("http.zig");
 const profiles = @import("profiles.zig");
 const articles = @import("articles.zig");
 const operations = @import("operations.zig");
+const read_batch = @import("read_batch.zig");
 pub const prepared_queries = @import("build_options").prepared_queries;
 
 // Minimal declarations from PostgreSQL 18's public libpq-fe.h ABI.
@@ -144,7 +145,8 @@ fn prepareItem(index: usize) ?struct { name: [:0]const u8, sql: [:0]const u8 } {
     const routes = [_]http.Route{ .tags, .register, .login, .current, .update, .profile, .follow, .unfollow, .comments };
     if (index < routes.len) return .{ .name = statementName(routes[index], null), .sql = querySql(routes[index], null) };
     const offset = index - routes.len;
-    if (offset >= 11) return null;
+    if (offset == 11) return .{ .name = "batch_single", .sql = read_batch.single_sql };
+    if (offset > 11) return null;
     const read: articles.Read = .{
         .family = @fromBackingInt(@intCast(if (offset < 6) offset else offset - 6)),
         .phase = if (offset < 6) .page else .count,
@@ -275,32 +277,59 @@ pub fn articlePage(result: *Result, allocator: std.mem.Allocator, full: bool) ![
     if (count > @as(usize, if (full) 1 else 100)) return error.DatabaseResult;
     const rows = try allocator.alloc(articles.Article, count);
     var total: usize = 0;
-    for (rows, 0..) |*article, index| {
-        const row: c_int = @intCast(index);
-        for (0..@intCast(columns)) |column| {
-            total += @intCast(PQgetlength(result, row, @intCast(column)));
-            if (total > 4 * 1024 * 1024) return error.ResponseTooLarge;
-        }
-        const favorites = std.fmt.parseInt(i64, try required(result, row, 6), 10) catch return error.DatabaseResult;
-        if (favorites < 0) return error.DatabaseResult;
-        article.* = .{
-            .slug = try textCell(result, row, 0, allocator),
-            .title = try textCell(result, row, 1, allocator),
-            .description = try textCell(result, row, 2, allocator),
-            .createdAt = try textCell(result, row, 3, allocator),
-            .updatedAt = try textCell(result, row, 4, allocator),
-            .tagList = try articles.tags(allocator, try required(result, row, 5)),
-            .favoritesCount = favorites,
-            .favorited = try boolean(result, row, 7),
-            .author = .{
-                .username = try textCell(result, row, 8, allocator),
-                .bio = try nullableCell(result, row, 9, allocator),
-                .image = try nullableCell(result, row, 10, allocator),
-                .following = try boolean(result, row, 11),
-            },
-            .body = if (full) try textCell(result, row, 12, allocator) else null,
-        };
+    for (rows, 0..) |*article, index| article.* = try articleAt(result, @intCast(index), 0, allocator, full, &total);
+    return rows;
+}
+
+fn articleAt(result: *Result, row: c_int, offset: c_int, allocator: std.mem.Allocator, full: bool, total: *usize) !articles.Article {
+    const columns: usize = if (full) 13 else 12;
+    for (0..columns) |column| {
+        total.* += @intCast(PQgetlength(result, row, offset + @as(c_int, @intCast(column))));
+        if (total.* > 4 * 1024 * 1024) return error.ResponseTooLarge;
     }
+    const favorites = std.fmt.parseInt(i64, try required(result, row, offset + 6), 10) catch return error.DatabaseResult;
+    if (favorites < 0) return error.DatabaseResult;
+    return .{
+        .slug = try textCell(result, row, offset + 0, allocator),
+        .title = try textCell(result, row, offset + 1, allocator),
+        .description = try textCell(result, row, offset + 2, allocator),
+        .createdAt = try textCell(result, row, offset + 3, allocator),
+        .updatedAt = try textCell(result, row, offset + 4, allocator),
+        .tagList = try articles.tags(allocator, try required(result, row, offset + 5)),
+        .favoritesCount = favorites,
+        .favorited = try boolean(result, row, offset + 7),
+        .author = .{
+            .username = try textCell(result, row, offset + 8, allocator),
+            .bio = try nullableCell(result, row, offset + 9, allocator),
+            .image = try nullableCell(result, row, offset + 10, allocator),
+            .following = try boolean(result, row, offset + 11),
+        },
+        .body = if (full) try textCell(result, row, offset + 12, allocator) else null,
+    };
+}
+
+pub fn sendSingleBatch(conn: *Conn, inputs: []const read_batch.Input, allocator: std.mem.Allocator) !void {
+    const params = try read_batch.parameters(allocator, inputs);
+    if (prepared_queries) {
+        const values = [_]?[*:0]const u8{ params[0].ptr, params[1].ptr };
+        if (PQsendQueryPrepared(conn, "batch_single", 2, &values, null, null, 0) != 1) return error.DatabaseQuery;
+    } else try send(conn, read_batch.single_sql, &.{ params[0], params[1] });
+}
+
+pub fn checkSingleBatch(result: *Result, expected: usize) !void {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != 14 or PQntuples(result) != expected) return error.DatabaseResult;
+    for (0..expected) |index| {
+        const ordinal = std.fmt.parseInt(usize, try required(result, @intCast(index), 0), 10) catch return error.DatabaseResult;
+        if (ordinal != index + 1) return error.DatabaseResult;
+    }
+}
+
+pub fn singleBatchRow(result: *Result, index: usize, allocator: std.mem.Allocator) ![]articles.Article {
+    const row: c_int = @intCast(index);
+    if (cell(result, row, 1) == null) return &.{};
+    var total: usize = 0;
+    const rows = try allocator.alloc(articles.Article, 1);
+    rows[0] = try articleAt(result, row, 1, allocator, true, &total);
     return rows;
 }
 
