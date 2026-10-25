@@ -140,6 +140,33 @@ Each failed slot retires its connection and active operation without replay. Ind
 
 The original single-connection tests now wait for actual commit/idle state after a disconnected write instead of assuming a tags response on another owner is a barrier. Their rollback, ownership and visibility assertions remain. All new code, proxy fixtures, binaries and evidence stay in the existing workspace; no application, dependency or service was installed.
 
-## Next checkpoint
+## Final optimisation round: execution and selection
 
-Replace the current 256-client limit and linear scans before large direct-HTTP tests. Compare read batching and pipeline depth independently against the retained unbatched prepared control. Full-seed validation must guide final SQL choices; linked Linux runtime, clean installation and the official capacity hold remain required.
+Date: 2026-10-25. I replaced per-turn client scans with constant-time free/queue operations and an indexed deadline heap. The configurable ceiling is 131,072, reduced to existing process/kernel descriptor limits. Fixed partial-request deadlines, per-turn expiry/accept budgets and aggregate input/output limits keep idle-connection scaling bounded. Native checks cover 8,000 sockets and 4,000 replacements; a unit test covers 100,000 simulated scheduler slots.
+
+The unchanged full seed was generated and every official row-count/content fingerprint verified. Zig and the unchanged Go reference each pass 197/197 on successive fresh full clones; all normalized responses match. Eleven read query families/phases were profiled with automatic and forced-generic plans before selecting session-only generic planning. Short queries also disable session JIT; global settings and durable commit remain unchanged.
+
+Comments now use one prepared lookup/list statement with explicit newest-100 ordering and an empty-list/missing-article distinction. There are twenty named preparations. Queued tags reads form closed groups of at most 32, without a collection timer or later joins. A wire test confirms shared executions, a fresh query after the group and complete SQL-error delivery. The mutation state machine preserves its isolated transaction/rollback/no-replay behaviour.
+
+Three full-seed runs per configuration compare automatic/unbatched ReleaseSafe, tuned ReleaseSafe and tuned ReleaseFast: medians 7,532.7 / 8,789.2 / 9,734.6 requests/s. These candidates have two bcrypt workers and all have password-queue rejections, retained in the report. The combined fastest median is 29.2% above that experiment's control, not a claim about the final worker setting or official capacity.
+
+A separate three-run-per-setting comparison chooses four bcrypt workers. Two/four medians are 8,610.2 / 8,422.0 requests/s, with 726/36 errors respectively. Four performs more real password verifications and cuts failures by 95.0%; outstanding jobs remain bounded at sixteen. The default rebuild matches the measured four-worker executable. These comparisons share the Mac with PostgreSQL and the unchanged generator, with accelerated sessions, and remain separate from prior optimisation percentages.
+
+The source-only Ubuntu installer pins/checks Zig and PostgreSQL source archives, builds only libpq, and leaves the provided server unchanged. It is never run on the Mac. Actual Ubuntu installation and runtime remain a final-review requirement; source/cross-link checks cannot replace that.
+
+## Next checkpoint: final review
+
+Review the final diff, rules and evidence; validate clean Ubuntu installation, epoll runtime and target descriptor limits through the challenge's Linux CI path. Preserve source-only submission scope and all no-cache/commit/auth guarantees. The official organiser capacity search, with separate generators and a five-minute full-seed hold, determines ranking. No local result is an official score, and no PR is opened during this optimisation round.
+
+Final native regression: fifteen unit checks, all 11/13/15/15/15 focused scenario groups, tags-group execution/freshness/error proof, 8,000 live sockets with 4,000 replacements, and ten recovery scenarios including a dedicated-cluster restart pass. The unchanged official runner also passes 197/197 with `TEMPLATE=conduit_seed`. The default native executable matches the measured four-worker fingerprint. A separate cross-link produces an x86_64 Linux ELF server and source-built libpq without running Linux; its client has TLS disabled, so it is a link/semantic proof rather than validation of the Ubuntu OpenSSL installer.
+
+The selected build completes a 300-second full-seed local hold after a 60-second ramp: 2,568,539 measured requests, 8,561.8 requests/s, p95 61.631 ms, p99 96.063 ms and 403 errors (0.01569%). All failures remain counted. This uses 512 accelerated users and a co-located generator on the Mac, not an official capacity search.
+
+
+The initial long hold exposed a password admission issue hidden by the aggregate error rate: 4.7% of logins were rejected. A separate two-run-per-setting A-B-B-A comparison increases the bounded outstanding-job limit from sixteen to sixty-four, retaining four workers and full cost-10 verification. Errors are 51 versus 16 with a 1.3% lower throughput median; the larger queue is selected for burst headroom. The auth overload regression now uses 160 simultaneous requests, and all auth/write/reference checks still pass.
+
+The selected 64-job executable passes another five-minute full-seed stress hold: 2,817,230 measured requests, 9,390.8 requests/s, p95 52.351 ms, p99 78.079 ms, 12 errors (0.000426%). Sequential long holds do not isolate throughput gains. No official user count is inferred.
+
+A separate normal-clock full-seed hold now passes for 8,000 actual Mac virtual users: 636,920 requests over 300 seconds, 2,123.1 requests/s, p95 1.251 ms, p99 3.659 ms, zero errors. This is a measured local lower bound, not a searched ceiling. The final accelerated throughput corresponds to approximately 35,386 users' normal request traffic at that observed rate; the mixed authentication pressure and untested socket population prohibit treating it as a score. Optional Ubuntu/Oracle validation and a calibrated reference-comparison method are in BENCHMARKING.md.
+
+Final selected-build checks also repeat the fifteen Debug unit tests, grouped-tag proof, all ten recovery cases including cluster restart, and the unchanged official runner on the full seed. The selected source cross-links again to x86_64 Linux after the queue-size change. Native and cross-linked fingerprints remain distinct; no Linux execution is claimed.

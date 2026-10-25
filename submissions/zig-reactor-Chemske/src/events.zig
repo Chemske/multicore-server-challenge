@@ -40,11 +40,11 @@ pub const Loop = struct {
         }
     }
 
-    pub fn wait(self: *Loop, output: []Event) !usize {
+    pub fn wait(self: *Loop, output: []Event, milliseconds: c_int) !usize {
         if (mac) {
             var raw: [128]c.Kevent = undefined;
             var changes: [1]c.Kevent = undefined;
-            const timeout: c.timespec = .{ .sec = 1, .nsec = 0 };
+            const timeout: c.timespec = .{ .sec = @divTrunc(milliseconds, 1000), .nsec = @as(isize, @rem(milliseconds, 1000)) * 1_000_000 };
             const n = c.kevent(self.fd, &changes, 0, &raw, @intCast(@min(raw.len, output.len)), &timeout);
             if (n < 0) {
                 if (c.errno(n) == .INTR) return 0;
@@ -59,7 +59,7 @@ pub const Loop = struct {
             return @intCast(n);
         } else {
             var raw: [128]c.epoll_event = undefined;
-            const n = c.epoll_wait(self.fd, &raw, @intCast(@min(raw.len, output.len)), 1000);
+            const n = c.epoll_wait(self.fd, &raw, @intCast(@min(raw.len, output.len)), milliseconds);
             if (n < 0) {
                 if (c.errno(n) == .INTR) return 0;
                 return error.EventWait;

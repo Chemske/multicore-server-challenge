@@ -1,4 +1,4 @@
-"""Compare builds with the unchanged load generator on fresh dev clones.
+"""Compare builds with the unchanged load generator on fresh seed clones.
 
 This is a local experiment, not the official capacity search. The generator,
 application and PostgreSQL share the Mac. No failed requests are filtered out.
@@ -33,12 +33,14 @@ def main():
     parser.add_argument('--think-scale', type=float, default=0.01)
     parser.add_argument('--ramp', default='10s')
     parser.add_argument('--measure', default='30s')
+    parser.add_argument('--tail', default='3s')
+    parser.add_argument('--template', choices=['conduit_dev', 'conduit_seed'], default='conduit_dev')
     args = parser.parse_args()
     labels = {'A', 'B', 'C'} if args.third else {'A', 'B'}
     if not args.order or set(args.order) - labels:
         parser.error('--order must select A, B, or C when --third is supplied')
-    if not 0 < args.users < 256:
-        parser.error('this experiment stays below the current 256-client limit')
+    if not 0 < args.users <= 8000:
+        parser.error('local Mac comparisons use 1–8000 users')
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
     builds = {'A': args.control.resolve(), 'B': args.candidate.resolve()}
@@ -47,9 +49,9 @@ def main():
     loadgen = Path(os.environ['CHALLENGE_WORK']) / 'tools/loadgen'
     report = {
         'started_at_utc': datetime.now(timezone.utc).isoformat(),
-        'scope': 'native Mac, development seed, co-located load generator; not an official score',
+        'scope': f'native Mac, {args.template}, co-located load generator; not an official score',
         'platform': platform.platform(), 'cpu_count': os.cpu_count(),
-        'seed_counts': sql('SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM articles)', 'conduit_dev'),
+        'seed_counts': sql('SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM articles)', args.template),
         'settings': {key: value for key, value in vars(args).items() if key not in ('control', 'candidate', 'third', 'out')},
         'binaries': {label: {'path': str(path), 'sha256': fingerprint(path)} for label, path in builds.items()},
         'loadgen_sha256': fingerprint(loadgen),
@@ -60,14 +62,14 @@ def main():
     try:
         for index, label in enumerate(args.order):
             name = f'{index + 1:02d}-{label}'
-            with Server(args.out, 'local-comparison', 'compare', name.replace('-', '_').lower(), builds[label]) as server:
+            with Server(args.out, 'local-comparison', 'compare', name.replace('-', '_').lower(), builds[label], template=args.template) as server:
                 output = args.out / f'{name}.json'
                 command = [str(loadgen), 'run', '-target', f'http://127.0.0.1:{server.port}',
                            '-users', str(args.users), '-ramp', args.ramp, '-measure', args.measure,
-                           '-tail', '3s', '-think-scale', str(args.think_scale), '-articles', '10000',
+                           '-tail', args.tail, '-think-scale', str(args.think_scale), '-articles', '500000' if args.template == 'conduit_seed' else '10000',
                            '-secret', server.secret, '-run-id', f'compare{os.getpid()}n{index}', '-out', str(output)]
                 with (args.out / f'{name}.log').open('w') as log:
-                    subprocess.run(command, stdout=log, stderr=log, check=True, timeout=300)
+                    subprocess.run(command, stdout=log, stderr=log, check=True, timeout=900)
                 merged = args.out / f'{name}-merged.json'
                 with (args.out / f'{name}-merged.log').open('w') as log:
                     merge = subprocess.run([str(loadgen), 'merge', '-o', str(merged), str(output)],

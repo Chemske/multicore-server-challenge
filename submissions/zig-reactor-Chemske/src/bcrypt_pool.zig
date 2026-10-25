@@ -3,8 +3,8 @@ const c = std.c;
 const events = @import("events.zig");
 const bcrypt = std.crypto.pwhash.bcrypt;
 
-pub const capacity = 16;
-pub const worker_count = 2;
+pub const capacity = @import("build_options").bcrypt_jobs;
+pub const worker_count = @import("build_options").bcrypt_workers;
 pub const Job = struct {
     mode: enum { hash, verify } = .hash,
     password: [72]u8 = @splat(0),

@@ -32,14 +32,17 @@ const unfavorite_sql =
     \\ DELETE FROM favorites WHERE user_id = $1 AND article_id IN (SELECT id FROM target) RETURNING article_id)
     \\SELECT t.id FROM target t CROSS JOIN (SELECT count(*) FROM changed) applied
 ;
-const list_comments_sql =
-    \\SELECT c.id, c.body,
+pub const list_comments_sql =
+    \\SELECT a.id, c.id, c.body,
     \\ to_char(c.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     \\ to_char(c.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-    \\ u.username, u.bio, u.image,
-    \\ EXISTS (SELECT 1 FROM follows fo WHERE fo.follower_id = $1 AND fo.followee_id = c.author_id)
-    \\ FROM comments c JOIN users u ON u.id = c.author_id
-    \\ WHERE c.article_id = $2 ORDER BY c.created_at DESC, c.id DESC LIMIT 100
+    \\ c.username, c.bio, c.image, c.following
+    \\ FROM articles a LEFT JOIN LATERAL (
+    \\ SELECT c.id,c.body,c.created_at,c.updated_at,u.username,u.bio,u.image,
+    \\ EXISTS (SELECT 1 FROM follows fo WHERE fo.follower_id = $1 AND fo.followee_id = c.author_id) AS following
+    \\ FROM comments c JOIN users u ON u.id=c.author_id
+    \\ WHERE c.article_id=a.id ORDER BY c.created_at DESC,c.id DESC LIMIT 100
+    \\ ) c ON true WHERE a.slug=$2 ORDER BY c.created_at DESC,c.id DESC
 ;
 const insert_comment_sql =
     \\WITH c AS (INSERT INTO comments(article_id, author_id, body) VALUES ($2, $1, $3) RETURNING *)
@@ -72,7 +75,8 @@ pub const Operation = struct {
             .kind = kind,
             .stage = switch (kind) {
                 .create_article => .begin,
-                .comments, .create_comment => .lookup,
+                .comments => .comment_rows,
+                .create_comment => .lookup,
                 else => .mutate,
             },
             .http_status = switch (kind) {
@@ -91,7 +95,8 @@ pub const Operation = struct {
             .insert_tags => input[4..5],
             .link_tags => &.{ self.id, input[4] },
             .lookup => input[1..2],
-            .article_row, .comment_rows => &.{ input[0], self.id },
+            .article_row => &.{ input[0], self.id },
+            .comment_rows => input[0..2],
             .mutate => if (self.kind == .create_comment) &.{ input[0], self.id, input[2] } else input,
         };
         q.count = args.len;

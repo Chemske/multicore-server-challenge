@@ -255,15 +255,16 @@ try:
             assert raw_response(reader)[0] == 401
     passed('split body, ordered pipelining and no identity carried between requests')
 
-    barrier = threading.Barrier(40)
+    concurrency = 160
+    barrier = threading.Barrier(concurrency)
     def parallel_login(_):
         barrier.wait(timeout=10)
         return request('POST', '/api/users/login', login)[0]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=40) as pool:
-        futures = [pool.submit(parallel_login, i) for i in range(40)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(parallel_login, i) for i in range(concurrency)]
         deadline = time.monotonic() + 5
-        while barrier.n_waiting < 39 and not barrier.broken and time.monotonic() < deadline:
-            # The barrier releases itself when all 40 threads arrive.
+        while barrier.n_waiting < concurrency - 1 and not barrier.broken and time.monotonic() < deadline:
+            # The barrier releases itself when all client threads arrive.
             if any(f.done() for f in futures):
                 break
             time.sleep(0.001)

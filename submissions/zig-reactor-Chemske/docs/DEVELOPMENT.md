@@ -9,7 +9,7 @@ The checkout is one directory inside a surrounding workspace. From the workspace
 | Location | Purpose |
 |---|---|
 | `multicore-server-challenge/` | Repository and source |
-| `work/tools/` | Project-local Go, GitHub CLI, later PostgreSQL/libpq |
+| `work/tools/` | Project-local Go, GitHub CLI and PostgreSQL/libpq |
 | `work/cache/` | Go/Zig build and dependency caches |
 | `work/runtime/` | Database cluster, socket files, logs, process metadata |
 | `work/tmp/` | Temporary downloads and scratch files |
@@ -57,9 +57,9 @@ bash seed/make-seed.sh
 TEMPLATE=conduit_seed bash test/run.sh submissions/zig-reactor-Chemske
 ```
 
-Development-seed conformance now passes for the complete Zig API. Full-seed conformance, Linux runtime validation and capacity measurements remain future work. The milestone tests run the unchanged suite; older result files preserve their checkpoint failures. Seed creation replaces the named seed database, so it belongs in the dedicated project cluster. The dev helper preserves an existing seed instead of replacing it. Test/run creates and removes a temporary database. Load tests need separate disposable copies because they mutate data. Local development-seed load runs use 10,000 seeded articles rather than the full-data default.
+Both development- and full-seed conformance now pass for the complete Zig API. Local full-seed comparisons are documented in PERFORMANCE.md; Linux runtime validation and official capacity remain outstanding. The milestone tests run the unchanged suite; older result files preserve their checkpoint failures. Seed creation replaces the named seed database, so it belongs in the dedicated project cluster. The dev helper preserves an existing seed instead of replacing it. Test/run creates and removes a temporary database. Load tests need separate disposable copies because they mutate data. Local development-seed load runs use 10,000 seeded articles rather than the full-data default.
 
-The Mac's six cores and 8 GiB RAM cannot reproduce the official Linux target. Keep local load within host limits, monitor generator saturation and memory pressure, and never label local capacity as an official score. Linux CI is a required compatibility check; the organiser's benchmark determines the ranking. No remote server rental is part of this plan.
+The Mac's six cores and 8 GiB RAM cannot reproduce the official Linux target. Keep local load within host limits, monitor generator saturation and memory pressure, and never label local capacity as an official score. Linux CI is a required compatibility check; the organiser's benchmark determines the ranking. No remote server has been rented. BENCHMARKING.md describes an optional short-lived Oracle x86 test requested during the final optimisation round; no cloud resource is created without selecting that next step.
 
 ## Current footprint and cleanup inventory
 
@@ -105,3 +105,21 @@ Milestone 6 adds a build-time database pool size and readiness-driven replacemen
 All proposed submission files stay under submissions/zig-reactor-Chemske. Shared challenge files remain unchanged. Documentation is in English and distinguishes intended behaviour from verified behaviour. Reused source keeps its licence and attribution; no invented benchmark or test result belongs in the README.
 
 The existing remote branch name zig-httpz-chemske reflects an earlier candidate and does not describe the selected reactor design. It can be renamed before submission; no PR is being opened during research.
+
+## Final optimisation round: full data and connection scheduling
+
+The unchanged full seed is now present as `conduit_seed`: 100,000 users, 500,000 articles, 200 tags, 1,250,377 article/tag links, 4,990,637 favourites, 2,494,001 comments and 1,989,808 follows. Every official row-count/content fingerprint matched. Its reported database size is 2,314 MiB. The generator's temporary TSV files and executable were removed by the unchanged script.
+
+To contain seed-generation outputs, I copied the unchanged `seed/make-seed.sh` and `schema.sql` into `work/full-seed/`, with its `bench` symlink pointing at the original repository bench directory. This changes neither generator nor schema. The checked log is `work/experiments/final-round/full-seed.log`. Do not rerun seed generation casually: the upstream script replaces its named seed database.
+
+`tests/full_seed.py` runs the unchanged 197-step suite on a fresh full clone for Zig and then a separate fresh full clone for Go. All normalized responses match. The development-focused tests keep their smaller, purpose-built fixtures; they are not silently relabelled full-seed tests. Benchmarks use `--template conduit_seed --users 512 --think-scale 0.005` for the local full-data comparisons. Session/think times remain accelerated and the generator remains on the Mac.
+
+Connection scheduling now has a configurable 131,072-slot ceiling and uses constant-time free/queue operations plus an indexed deadline heap. The native socket test is `python3 tests/connections.py`: 8,000 real sockets, 4,000 slot replacements, bounded input pressure and a fixed partial-request deadline. The 100,000-slot unit test simulates scheduler state only. No kernel setting is changed to make the Mac reach Linux connection counts.
+
+New tests and query-plan analysis use Python's existing standard library, libpq, psql and the existing compiler. No VM, Docker, extra application or background service was installed. Saved binaries, SQL plan JSON, raw benchmark histograms and full-seed logs remain under `work/experiments/final-round/`. The Ubuntu-only installer builds its private client library on the benchmark host; it must not be run on the Mac.
+
+For cleanup after the final review, stop the interactive server and dedicated PostgreSQL cluster first. The full seed, WAL and compiler caches are generated data under `work/`; retaining `conduit_seed` until the last check avoids regenerating it. Temporary clones are removed after each test/run. The exact end-of-round footprint is recorded in the review output, since peak disk usage during a clone is larger than the retained template.
+
+A further cross-link proof built PostgreSQL 18.6's client library and the server for x86_64 Linux using the existing Zig compiler on macOS. The results are ELF executable/shared-library files under `work/experiments/final-round/linux-cross/`. This installs no Linux tool or application on the Mac and executes no Linux code. The proof disables TLS/optional client features and uses a private cross-build prefix; it does not validate the Ubuntu installer's OpenSSL-enabled client or runtime search paths. The Ubuntu installer still needs an actual Linux run.
+
+At the end of this round, generated `work/` data occupies about 4.8 GiB, including about 3.2 GiB for the dedicated PostgreSQL cluster (the full seed, development/interactive databases and retained WAL). All load-test databases and temporary servers are removed after their runs. The final source remains under this submission folder; compiled executables, query plans and benchmark histograms are not committed. Keep the full template for the last Ubuntu/review step, then stop project processes before deleting generated data. No new Mac application or system service was installed in this round.

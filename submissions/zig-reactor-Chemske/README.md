@@ -2,30 +2,29 @@
 
 Front: direct
 
-**Status: milestone 6 — bounded database concurrency and automatic recovery; 197/197 development-seed conformance checks pass. Not submission-ready.**
+I am building a complete Conduit API for the Multicore Server Challenge in Zig. The idea is to reduce work per request across the whole machine, especially PostgreSQL, while keeping admission, memory and failure recovery bounded.
 
-I am building a Conduit implementation for the Multicore Server Challenge, targeting the highest sustainable official score. My development environment is native macOS on Apple Silicon. I keep the toolchain, database, caches and generated files within one project workspace wherever the tools allow it.
+The server uses one readiness-driven reactor, four owned non-blocking PostgreSQL connections and a bounded bcrypt pool. It prepares twenty read/auth/profile queries, coalesces only tags reads already waiting before dispatch, and keeps mutations on an isolated durable transaction path. It never caches database data, JWT checks or bcrypt results.
 
-The implementation is a small event-driven Zig server using the official PostgreSQL client library in non-blocking mode. It serves the complete Conduit API directly over HTTP/1.1, including article writes, favourites and comments. Four database owners progress independently and recover failed connections without replaying requests. Nineteen fixed queries on the original API path are prepared per connection; the article/comment operation state machine still uses its original parameterized statements. Query batching and clean Linux installation remain planned.
+**Validation:** all 197 unchanged conformance steps pass on both development and full seeds on my native Mac, with all normalized responses matching the unchanged Go reference. An x86_64 Linux cross-link succeeds; the Linux runtime, clean Ubuntu installation and official capacity score still require validation. This is not a leaderboard result.
 
-The central idea is simple: **make each request create less work for the whole machine, especially PostgreSQL.** More threads are not automatically more useful when the application and database share eight CPUs.
-
-## Proposed stack
+## Stack
 
 | Component | Choice |
 |---|---|
 | Application | Zig 0.17.0 |
-| Networking | Small Zig reactor; kqueue on macOS, epoll on Linux |
-| HTTP parsing | Vendored picohttpparser at 465a7ff09fbd3432fe56c673451f5460154d1f07 |
-| PostgreSQL | PostgreSQL/libpq 18.6; four owned non-blocking connections, named prepared queries and recovery; pipeline mode planned |
-| Authentication | HS256 on every authenticated request; bcrypt cost 10 in two bounded workers |
-| Deployment | Direct HTTP; official Ubuntu 24.04 x86_64 runtime contract |
+| Networking | Zig reactor; kqueue on macOS, epoll on Linux |
+| HTTP | Vendored picohttpparser, revision 465a7ff09fbd3432fe56c673451f5460154d1f07 |
+| Database | Source-built libpq 18.6, non-blocking connections, prepared statements |
+| Authentication | HS256 checked per request; bcrypt cost 10 checked per login, fresh salts |
+| Front | Direct HTTP, no proxy or extra service |
+| Target | Ubuntu 24.04 x86_64; native macOS ARM64 development |
 
-The application and scheduling logic are Zig. libpq and picohttpparser are C libraries, not separate services or development applications. Source pins and hashes are documented in [vendor/README.md](vendor/README.md). PostgreSQL is built locally from its official checked source archive.
+libpq and picohttpparser are linked C libraries. Source attribution and parser pins are in [vendor/README.md](vendor/README.md). The compiler/client installer checks official archive SHA-256 values. It does not install or configure a PostgreSQL server.
 
-## Run locally on macOS
+## Native Mac development
 
-From this submission directory, in Bash or Zsh:
+From this submission directory:
 
 ```sh
 source dev/env.sh
@@ -36,11 +35,17 @@ bash build.sh
 bash start.sh
 ```
 
-In another terminal, GET http://127.0.0.1:3000/api/tags. The environment defaults to the disposable interactive database conduit_local on authenticated loopback port 55432. The conduit_dev seed remains a template and must not have a server connected while tests copy it.
+Open http://127.0.0.1:3000/api/tags. Defaults use the interactive `conduit_local` database on authenticated loopback port 55432. Tests copy separate seed templates. Stop the application with Ctrl+C and the dedicated cluster with `bash dev/database.sh stop`. No VM, container, package manager, background service or automatic startup is added.
 
-Stop the server with Ctrl+C, then stop the dedicated database with `bash dev/database.sh stop`. Nothing is registered to start automatically with macOS.
+Tools, caches, database files and evidence stay in the surrounding workspace's `work/` directory. Source `dev/env.sh` before direct compiler or test commands. See [DEVELOPMENT.md](docs/DEVELOPMENT.md) for setup and cleanup, including the larger full-seed footprint.
 
-For the focused checks:
+## Ubuntu contract
+
+Run `bash install.sh` once as root on the benchmark's Ubuntu 24.04 x86_64 host, then `bash build.sh` and `bash start.sh` as the unprivileged runner. The installer pins Zig 0.17.0 and builds only libpq 18.6 from checked source under `/opt/conduit-zig-tools`. It leaves the provided PostgreSQL server configuration unchanged. This path is prepared but has not been executed on Ubuntu yet.
+
+Runtime configuration is exactly `DATABASE_URL`, `JWT_SECRET`, `HOST` and `PORT`. `start.sh` executes the server in the foreground. Build-time experiment controls are documented in [PERFORMANCE.md](docs/PERFORMANCE.md).
+
+## Checks
 
 ```sh
 source dev/env.sh
@@ -50,60 +55,41 @@ python3 tests/milestone2.py
 python3 tests/milestone3.py
 python3 tests/milestone4.py
 python3 tests/milestone5.py
+python3 tests/tag_batch.py
+python3 tests/connections.py
 python3 tests/recovery.py
+python3 tests/full_seed.py
 ```
 
-Each Python check creates and removes private database copies and launches its own server. Milestones 1–4 cover protocol behaviour, auth, profiles and article/feed reads. The profile gate checks every profile step reached by the current suite, now all 18. Milestone 5 requires the complete unchanged suite to pass and compares all 197 normalized responses with the unchanged Go reference. It also exercises failed transactions, committed writes, ownership and concurrent clients. Shared helpers use only Python's standard library. Test binaries, logs and transcripts stay under work/.
-
-The upstream runner also passes unchanged from this submission folder after sourcing the environment:
+The unchanged upstream runner can also build and test this folder:
 
 ```sh
 PORT=3105 bash ../../test/run.sh .
+TEMPLATE=conduit_seed PORT=3105 bash ../../test/run.sh .
 ```
 
-Choose an unused port so the runner's disposable server does not share the interactive server's port. The runner creates and removes its own database clone. This command does not imply a clean Ubuntu installation or a full-seed test.
+The full-seed commands require the unchanged official full seed in the dedicated cluster. Seed generation is not implicit: allow disk space for the template, one temporary clone and WAL. `tests/full_seed.py` runs Zig and Go sequentially so two full clones are never retained together. Each integration harness removes its temporary servers and databases, including on failure.
 
-## Design notes
+There are fifteen Zig unit checks and focused groups covering HTTP framing, auth, profiles, article/feed reads, mutations, commit visibility, rollback, disconnected clients and database recovery. The many-connection check uses 8,000 actual sockets with slot replacement and pressure/deadline cases; a separate scheduler unit check exercises 100,000 simulated slots. Neither establishes 100,000 live connections on Linux.
 
-- [Research and selection](docs/RESEARCH.md): evidence, alternatives, uncertainties and the case for this architecture.
-- [Competitor source review](docs/COMPETITOR_REVIEW.md): leading implementations, reproduced parser observations and specific improvement opportunities.
-- [Architecture](docs/ARCHITECTURE.md): ownership, scheduling, batching and correctness boundaries.
-- [Performance experiments](docs/PERFORMANCE.md): current rules/leaderboard recheck and reproducible local A/B measurements.
-- [Database recovery](docs/RECOVERY.md): connection ownership, setup, deadlines, failures and uncertain commits.
-- [Development and cleanup](docs/DEVELOPMENT.md): native Mac setup policy, milestone gates and removal inventory.
+The optional `python3 tests/recovery.py --restart-cluster` restarts only the dedicated project cluster and temporarily interrupts the interactive server. It is kept separate from routine editor tasks.
 
-## Current validation
+## Correctness boundaries
 
-The Zig server passes all 197 development-seed conformance steps through both the unchanged upstream runner and the focused milestone 5 harness. The unchanged Go reference also passes 197/197, and every normalized response matches. Twelve unit checks and the earlier 11 tags, 13 auth, 15 profile and 15 article/feed scenarios pass, together with 15 write scenarios.
+Every applicable request verifies its token; every login reads and verifies the current stored bcrypt hash. New passwords above 72 bytes are rejected; login truncation and corrected `$2a$` seed compatibility match Go. A present empty Authorization header is rejected, including on optional-auth routes.
 
-All API routes are implemented. This is a native Mac correctness result, not an official capacity score, full-seed result or Linux runtime validation.
+Article lists select page IDs before enrichment and then read the capped count in a separate statement, preserving that reference snapshot order. Counts stop at 1,000 without hiding later pages. Viewer flags, filter precedence, text arrays and UTC millisecond timestamps are computed per request. The feed uses overflow-safe arithmetic for the allowed large offsets.
 
-The auth checks include cross-verification with the unmodified Go reference for 72-byte, UTF-8 and embedded-NUL passwords. Zig 0.17 renders bcrypt as $2b$ and compares that version marker during verification; my adapter accepts the seed's corrected $2a$ format by normalizing only the marker before performing bcrypt. New passwords over 72 bytes are rejected; login verification follows Go's bcrypt truncation behaviour. Every login to an existing account still performs bcrypt verification, and changing the stored hash affects the next attempt.
+Comment listing combines article lookup and newest-100 comments into one prepared statement, with explicit ordering and a distinction between missing articles and empty lists. It therefore uses one statement snapshot; a concurrent deletion can be observed differently from the reference's two-query path. Coalesced tags requests also share one statement snapshot. No later request joins a dispatched group or reuses its result.
 
-A blocked update is tested to withhold success until the lock is released and the write commits. A separate database session confirms visibility after success. Forty concurrent logins exercise bounded overload while tags requests continue; rejected password jobs return 503 and are counted. These are correctness checks, not capacity measurements.
+Writes wait for confirmed commit. Article/tag/link creation is atomic. Failed transactions drain and roll back before reuse. Lost connections retire the active operation without replay, including a write whose COMMIT acknowledgement was lost. Healthy owners continue serving while another reconnects and rebuilds settings/prepared statements.
 
-Profile reads query the current relationship for the requesting viewer. Follow and unfollow each use one parameterized statement with a target lookup and data-modifying CTE. Their responses wait for transaction completion, including deferred commit errors. Repeated operations keep the requested following state. Tests cover external changes, concurrent duplicates, blocked writes and a deferred commit failure that rolls back the inserted relation.
+The configured client ceiling is 131,072, reduced to existing descriptor limits at startup (10,204 here on macOS). The server changes only its own soft descriptor limit within the existing hard/kernel ceiling. Tasks, password jobs, aggregate input/output buffers, per-request sizes and deadlines are bounded. Exceeding a limit can return 503 or close a connection; failures stay in benchmark results. Exact limits and ownership are in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-All 18 normalized profile responses match the unchanged Go reference, which passes all 197 steps on a separate fresh clone. One deliberate difference outside that transcript follows the specification: a present empty Authorization header returns 401. The Go reference treats that header as absent. Dynamic usernames are decoded once as path segments, preserving literal plus signs and encoded separators.
+## Evidence and remaining work
 
-Article lists select page IDs in descending order before enrichment, then run a separate capped count, preserving the reference's statement order and snapshot behaviour. Counts stop at 1,000 without limiting which pages are accessible. Tag, author and favourited filters have the required precedence; unknown filters produce empty lists. Every request computes viewer-dependent flags from the database. Single articles include body; list objects omit it. Zig serializes JSON and decodes PostgreSQL text arrays; SQL formats UTC timestamps with three truncated fractional digits.
+[PERFORMANCE.md](docs/PERFORMANCE.md) records separate, reproducible local comparisons with raw errors and hardware limitations. Short Mac runs use the unchanged generator with accelerated think/session times and share CPU with PostgreSQL; they cannot be converted into official user counts or added together as cumulative speedups.
 
-The read tests cover empty pages that still need a count, duplicate and encoded query parameters, escaped tag names, timestamps before 1970, 96 concurrent reads, failed page/count queries and slow/disconnected readers. Valid large feed offsets return empty pages with the correct count; the reference's int32 arithmetic returns 500 for a tested valid offset. My feed query uses overflow-safe arithmetic. No speedup is claimed from these correctness checks.
+[BENCHMARKING.md](docs/BENCHMARKING.md) explains honest Mac-to-Ubuntu workload conversion and a small optional Oracle Cloud test layout. [RECOVERY.md](docs/RECOVERY.md) describes the fault matrix, including uncertain commits without replay. [MILESTONES.md](docs/MILESTONES.md) preserves historical checkpoints. [RESEARCH.md](docs/RESEARCH.md) and [COMPETITOR_REVIEW.md](docs/COMPETITOR_REVIEW.md) record the original architecture research and source review.
 
-Article creation keeps its article, distinct tags and tag links inside one explicit transaction, then reads the committed article by ID. A failed stage is drained and rolled back before another request can use the connection. Ownership predicates are part of update/delete statements. Favourites are idempotent; comment lists return the newest 100 by creation time and ID. Successful deletions send a bodyless 204.
-
-The write checks inject tag/link and deferred-commit failures, block a transaction mid-write, and verify that no partial article is visible. Eight simultaneous Zig/Go creates on the same disposable database all link the same new tag correctly. Tests also cover 64 repeated favourite writes, concurrent comments, cascade deletion, disconnects and backend loss. If a write commits but its follow-up read fails, the response is 503 and the write is never automatically replayed.
-
-The Linux source path passes object-only cross-compilation; no linked Linux server has been run. There are no official scores.
-
-The first local performance experiment compares named prepared queries with the previous unprepared build. Across three runs of each on fresh development-seed clones, median throughput increased from 3,055.7 to 4,523.6 requests/s (+48.0%), and median p95 decreased from 35.615 to 17.471 ms. All 687,440 measured requests succeeded. The six-core Apple Silicon Mac with 8 GiB RAM also ran the generator and PostgreSQL; each run measured thirty seconds with accelerated think/session times. This selects a local candidate and does not establish official capacity. Complete settings, per-run results and limitations are in [PERFORMANCE.md](docs/PERFORMANCE.md). `-Dprepared-queries=false` retains an unprepared control; PostgreSQL's plan-selection heuristic remains unchanged.
-
-The second experiment compares one, two and four owners in the same recovering implementation. Across three fresh-clone runs per setting, median throughput is 4,430.1 / 6,163.1 / 6,447.0 requests/s. Four owners improve the one-owner control by 45.5%, with median p95 falling from 17.679 to 2.073 ms. All 1,549,517 measured requests succeed. These are separate short Mac experiments; their gains must not be added or compounded. Four is the current measured local default, still requiring full-seed and target-hardware validation. `-Ddb-connections=1` preserves the simple control; the checked build-time range is 1–95.
-
-Ten recovery/concurrency scenarios additionally pass, including a stalled authentication exchange, repeated backend loss, lost COMMIT acknowledgement and a full restart of the dedicated project cluster. The server retains exactly one committed article when its acknowledgement is lost and never replays the write. A blocked writer leaves other owners serving; a timed-out transaction rolls back. All 197 unchanged upstream steps pass after recovery.
-
-Current limits are deliberate: four database connections, 256 client slots, two bcrypt workers and at most 16 outstanding password jobs. Headers are limited to 16 KiB, bodies to 64 KiB and total buffered request data to 84 KiB. Chunked bodies are rejected and the connection closed. Idle clients have a 70-second timeout; active requests and database work have deadlines. Each owned database session sets an eight-second statement timeout. Query errors are drained, transactions roll back when needed, and lost connections are replaced with bounded backoff while healthy owners continue. Batching, large-connection scheduling and the Ubuntu install script remain future work. Article reads have a 4 MiB retained-field and serialized-response bound; larger results return 503.
-
-## Working principles
-
-I preserve the challenge's schema, workload and conformance suite. I verify every token and every login, commit writes before replying, and retain no response or query-result cache across requests. I document measurements with their hardware, data, commit and duration. Any reused code keeps its original attribution and licence.
+The next final review must validate the Ubuntu installation/runtime, epoll and target descriptor handling before a submission can claim compatibility. The organiser's full-seed, five-minute capacity search determines ranking. No PR or official score has been published from these local measurements.

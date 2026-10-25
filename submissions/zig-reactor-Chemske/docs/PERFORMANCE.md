@@ -14,7 +14,7 @@ I keep these constraints throughout optimisation:
 - The schema, indexes, seed, workload and shared test files remain fixed. Prepared statements and connection pools are explicitly allowed. Total application database connections must stay at or below 95.
 - Writes wait for durable commit. No asynchronous commit, speculative success or automatic replay after an uncertain write outcome.
 - Every applicable request verifies HS256 and expiry. Every login verifies the current stored bcrypt hash; new hashes use cost 10 and fresh salts.
-- Direct HTTP must eventually support tens of thousands of idle connections. The present 256-client limit is only a development limit.
+- Direct HTTP must eventually support tens of thousands of idle connections. The configured ceiling is now 131,072, clamped to existing descriptor limits; the Mac live-socket check covers 8,000.
 - The submission must build from pinned source on Ubuntu 24.04 x86_64 and pass the unchanged conformance suite. A Mac run cannot establish this.
 
 Sources: [rules and scoring](https://github.com/arjaythedev/multicore-server-challenge/blob/c3012257f2ee3dd2ccc72ada2eeba2b0d1278e8e/README.md), [runtime contract](https://github.com/arjaythedev/multicore-server-challenge/blob/c3012257f2ee3dd2ccc72ada2eeba2b0d1278e8e/SPEC.md), [workload](https://github.com/arjaythedev/multicore-server-challenge/blob/c3012257f2ee3dd2ccc72ada2eeba2b0d1278e8e/WORKLOAD.md), [leaderboard](https://github.com/arjaythedev/multicore-server-challenge/blob/c3012257f2ee3dd2ccc72ada2eeba2b0d1278e8e/LEADERBOARD.md).
@@ -110,6 +110,107 @@ Recovery validation covers stalled authentication, bounded retry backoff, isolat
 
 Raw results, endpoint distributions and executable fingerprints are under `work/experiments/database-concurrency/comparison/`; fault-injection evidence is under `work/results/recovery/`. The default executable is checked against the measured four-owner fingerprint after rebuilding.
 
-## Next experiments
+## Experiment 3: full-seed planning and queued tags groups
 
-Replace linear client scans and the development connection limit before large direct-HTTP tests. Measure bounded read batching independently against the unbatched prepared control, with full-seed correctness and query plans checked before final SQL choices. Only then consider group commit, binary result decoding or specialised bcrypt work if profiling supports them. Clean Linux installation/runtime and the official capacity hold remain required.
+The official full seed was generated with unchanged code/schema and all count/content fingerprints verified. The generator's temporary data was removed. It contains 500,000 articles and uses 2,314 MiB. The unchanged 197-step suite passes for Zig and Go on successive fresh full clones, and all normalized responses match.
+
+Before tuning SQL, I replaced the 256-client linear scans with a descriptor-aware configurable ceiling, a free list, an intrusive pending FIFO and an indexed deadline heap. A preliminary full-seed, 128-user A/B pair gave 6,186 versus 6,149 requests/s (about -0.6%, not a gain), with zero errors. The scheduler is retained for bounded scaling, not for a claimed throughput improvement at 128 users. Native testing opens 8,000 sockets and replaces 4,000 of them; the 100,000-slot test is simulated state, not live Linux sockets.
+
+Eleven read query families/phases were profiled on the full seed using six prepared executions each under automatic and forced-generic plans. Only private session settings changed. Representative warmed planning/execution times in milliseconds were 0.273/0.168 versus 0.003/0.167 for the all-article page, 0.296/0.182 versus 0.003/0.174 for a tag page, and 0.096/0.027 versus 0.001/0.025 for a single article. These representative parameters do not establish every skew/offset plan. Raw EXPLAIN ANALYZE/BUFFERS JSON is preserved.
+
+The current read path adds one prepared comments statement, combining article existence and newest-100 comments. This reduces a round trip and uses one statement snapshot. The SQL keeps explicit ordering and distinguishes missing articles from empty lists. Mutations retain their isolated parameterized transaction stages.
+
+Queued tags groups take at most 32 reads from work already waiting before execution, scanning at most 64 queued candidates. No collection delay is added. A wire-proxy test observes 64 correct responses from six PostgreSQL executions; a later request executes a new query and sees an external insert. An injected SQL failure is delivered to all 64 recipients from two executions; subsequent requests recover. The exact number of executions depends on arrival/dispatch timing. This is evidence of grouping and freshness, not a standalone throughput claim.
+
+I compared three builds, each with the same scheduler, four database owners, two bcrypt workers and twenty preparations:
+
+| Build | Changes | Median requests/s | Median per-run p95 ms | Median per-run p99 ms |
+|---|---|---:|---:|---:|
+| A | ReleaseSafe, automatic plans, no tags groups | 7,532.7 | 61.887 | 80.767 |
+| B | ReleaseSafe, forced generic plans, tags groups | 8,789.2 | 55.903 | 80.639 |
+| C | Same tuning as B, ReleaseFast | 9,734.6 | 46.943 | 64.287 |
+
+There are three runs per build in A-B-C-C-B-A-A-B-C order, on fresh full-seed clones, with 512 virtual users, a ten-second ramp, thirty-second measurement, three-second tail and think-scale 0.005. No other tests or builds ran during measurement. The compiler is Zig 0.17.0; the host is the same six-core, 8 GiB native Mac. All flags report no generator limit, but host-wide generator CPU is unavailable here, so this is not an official generator-capacity verdict.
+
+B's median is 16.7% above A; C's is 29.2% above A. These compare combined candidates and do not isolate the separate generic-plan, grouping and compiler effects. ReleaseFast removes implicit Zig runtime safety checks; explicit parsing, size, authentication, transaction and ownership validation remain. Both the tuned ReleaseSafe and ReleaseFast paths pass the correctness regressions.
+
+Every run has errors: A has 304/286/254, B has 296/371/333, and C has 280/317/300. All are 503 responses on login/registration, where the bounded two-worker password pool saturates. They are retained in throughput/error distributions; none are filtered out. Total error rates remain below 1%, but these failures motivate a separate bcrypt-admission comparison. A higher throughput number obtained while rejecting more logins is not sufficient to select the final build.
+
+The setup commands also set session-only `jit=off`. This has no JIT effect in my non-LLVM native PostgreSQL build, but avoids compilation overhead for short statements on a JIT-capable target. No schema, indexes, global settings or durable-commit settings change.
+
+Raw evidence is under `work/experiments/final-round/full-options/`, with the scheduler pilot under `full-pilot/` and query plans in `query-plans.json`. Historical experiments above remain separate; their percentages must not be added or compounded.
+
+## Experiment 4: bcrypt admission and final build
+
+Two and four bcrypt workers were compared with identical ReleaseFast, generic-plan, grouped-tags executables and four database owners. All authentication work remains bcrypt cost 10 against the current stored hash; the outstanding-job limit remains 16. The order is A-B-B-A-B-A, three runs each, with the same full seed and 512-user/think-scale 0.005 local settings as experiment 3.
+
+| Workers | Median requests/s | Median per-run p95 ms | Median per-run p99 ms | Errors / requests across all three runs |
+|---:|---:|---:|---:|---:|
+| 2 | 8,610.2 | 55.839 | 73.343 | 726 / 848,724 |
+| 4 | 8,422.0 | 65.311 | 88.063 | 36 / 783,195 |
+
+Four workers reduce errors from 726 to 36 (95.0% fewer). They complete more real logins instead of rejecting them, consuming additional CPU shared with SQL. I choose four despite a small lower overall throughput median. These are repeated stochastic runs, not identical request traces; background/thermal drift is visible, and no performance claim is based on the first fast control alone. All failures remain 503 responses in the password path and remain included in the report. The final build is not described as error-free.
+
+The selected defaults are ReleaseFast, prepared queries, forced generic plans, session JIT off, grouped queued tags, four database owners and four bcrypt workers. The default rebuild matches the measured four-worker executable byte for byte. Raw evidence and fingerprints are in `work/experiments/final-round/bcrypt-options/`.
+
+| Control | Default | Allowed alternative |
+|---|---|---|
+| Optimisation | `build.sh`: ReleaseFast | direct `zig build -Doptimize=ReleaseSafe` |
+| Prepared statements | `-Dprepared-queries=true` | `false` |
+| Plan selection | `-Dgeneric-plans=true` | `false` for PostgreSQL auto |
+| Queued tags groups | `-Dtag-batch=true` | `false` |
+| Database owners | `-Ddb-connections=4` | 1–95 |
+| Bcrypt workers | `-Dbcrypt-workers=4` | 1–8 |
+| Outstanding bcrypt jobs | `-Dbcrypt-jobs=64` | 16–128 |
+| Configured HTTP slots | `-Dmax-clients=131072` | 256–262144, descriptor-clamped |
+
+Session JIT off and the eight-second statement timeout are fixed setup choices. None change global database settings. Build controls are diagnostic experiment choices, not runtime environment variables.
+
+## Initial five-minute hold: sixteen outstanding bcrypt jobs
+
+The selected executable ran with 512 virtual users, think-scale 0.005, a sixty-second ramp, 300 measured seconds and a fifteen-second tail. The generator is unchanged and co-located with the application and PostgreSQL on the six-core, 8 GiB Mac. The database is a fresh clone of the verified full seed. No builds or other tests ran during the hold.
+
+| Measured requests | Requests/s | p95 ms | p99 ms | Errors | Error rate |
+|---:|---:|---:|---:|---:|---:|
+| 2,568,539 | 8,561.8 | 61.631 | 96.063 | 403 | 0.01569% |
+
+All errors remain in the report. The local merged latency/error verdict passes and the generator reports no limit. Host-wide generator CPU is unavailable on macOS; this does not certify the official generator-capacity condition. The application stayed alive for the full run; sampled RSS was around 7 MiB (samples, not a peak or total host-memory figure). About 4.91% of requests are writes.
+
+These latency/error values are inside the challenge thresholds, but this remains an accelerated native Mac workload with a co-located generator. It is not a capacity search, official user count or leaderboard score. It does not prove the same behaviour on the eight-vCPU Ubuntu host. Raw request/endpoint histograms, workload mix, fingerprints and generator metadata are preserved under `work/experiments/final-round/full-hold/`.
+
+## Experiment 5: bounded password-queue headroom
+
+The first long hold's low total error rate hid 395 rejected logins out of 8,376 (4.7%). I kept four bcrypt workers and tested 16 versus 64 outstanding jobs, including running/completed jobs awaiting collection. This adds bounded burst headroom without adding hashing threads, reducing cost, caching results or changing request deadlines. A build option retains the smaller control. An overload regression now sends 160 simultaneous logins and still verifies 503 under excess load while tags progress.
+
+Two fresh-clone runs per queue size in A-B-B-A order use the same 512-user/full-seed/think-scale 0.005 settings:
+
+| Outstanding jobs | Median requests/s | Median per-run p95 ms | Median per-run p99 ms | Errors / requests |
+|---:|---:|---:|---:|---:|
+| 16 | 8,636.2 | 61.951 | 97.503 | 51 / 518,170 |
+| 64 | 8,527.3 | 63.583 | 100.607 | 16 / 511,638 |
+
+The larger queue reduces measured errors from 51 to 16; median throughput is 1.3% lower. There are only two runs per setting, with visible run-to-run variation. The choice favours fewer dropped authentication attempts and bounded resource use. Auth, write/reference and fifteen unit checks pass. The default rebuilt executable matches the measured 64-job candidate byte for byte.
+
+The selected 64-job build then completes a new five-minute hold, with the same 60-second ramp/300-second measure/15-second tail:
+
+| Measured requests | Requests/s | p95 ms | p99 ms | Errors | Error rate |
+|---:|---:|---:|---:|---:|---:|
+| 2,817,230 | 9,390.8 | 52.351 | 78.079 | 12 | 0.000426% |
+
+The full run remains a co-located native Mac stress test, not an official score. No builds or tests run alongside it. Compared with the earlier long hold, errors fall from 403 to 12; these sequential holds are not a controlled paired estimate of throughput gain. All failures are retained. The generator reports no limit, but host-wide CPU sampling is unavailable on macOS. Raw evidence is under `queue-options/` and `full-hold-64/` in `work/experiments/final-round/`.
+
+## Normal-clock native hold: 8,000 real users
+
+To separate real user count from accelerated clock demand, the selected build also runs 8,000 actual virtual users with `think-scale=1`, the full seed, a 60-second ramp, 300 measured seconds and 15-second tail. The generator and PostgreSQL remain on the Mac. Each virtual user owns its normal keep-alive connection; this is distinct from the earlier idle-socket test.
+
+| Real users | Measured requests | Requests/s | p95 ms | p99 ms | Errors |
+|---:|---:|---:|---:|---:|---:|
+| 8,000 | 636,920 | 2,123.1 | 1.251 | 3.659 | 0 |
+
+The run passes the local latency/error verdict and reports no generator limit. Host-wide generator CPU is unavailable on macOS. This establishes a successful 8,000-user native hold, not the maximum: no user-count capacity search was run. The Mac's existing descriptor ceiling prevents a comparable 100,000-socket test without changing host settings, which I do not do.
+
+Observed normal demand is 0.265383 requests/s/user. Dividing the accelerated hold's 9,390.8 requests/s by this rate gives about 35,386 users' request traffic. That is a traffic conversion, not a tested population or Ubuntu prediction. Accelerated sessions impose much more bcrypt demand per browsing request. See BENCHMARKING.md for the separate authentication calculation, scenario table and optional cloud calibration plan. All raw evidence is under `work/experiments/final-round/normal-hold-8000/`.
+
+## Final-check requirements
+
+Clean Ubuntu installation/runtime, epoll progress, target descriptor handling and an organiser-run capacity hold remain required. The five-minute native full-seed hold is still a co-located, accelerated experiment, not official capacity. A real leaderboard score requires the organiser's unchanged workload and separate load generators.

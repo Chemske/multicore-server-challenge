@@ -6,7 +6,11 @@ const pg = @import("postgres.zig");
 const requests = @import("requests.zig");
 const bcrypt = @import("bcrypt_pool.zig");
 
-const max_clients = 256;
+const scheduling = @import("scheduler.zig");
+const max_clients = @import("build_options").max_clients;
+const max_tasks = 2048;
+const max_input_bytes = 32 * 1024 * 1024;
+const max_output_bytes = 64 * 1024 * 1024;
 const max_input = http.max_head + http.max_body + 4096;
 const database_bit: u64 = 1 << 31;
 const database_connections = @import("build_options").database_connections;
@@ -21,6 +25,8 @@ const Database = struct {
     retry_delay: i64 = 250,
     generation: u32 = 1,
     fd: c_int = -1,
+    tag_requests: [31]?*requests.Task = @splat(null),
+    tag_count: usize = 0,
 };
 const State = enum { closed, reading, queued, database, hashing, writing };
 const Client = struct {
@@ -31,8 +37,6 @@ const Client = struct {
     output: []u8 = &.{},
     sent: usize = 0,
     keep_alive: bool = true,
-    last_activity: i64 = 0,
-    sequence: u64 = 0,
     task: ?*requests.Task = null,
 };
 
@@ -46,7 +50,11 @@ const Server = struct {
     clients: []Client,
     pool: *bcrypt.Pool,
     secret: []const u8,
-    sequence: u64 = 0,
+    scheduler: scheduling.Scheduler,
+    task_count: usize = 0,
+    input_bytes: usize = 0,
+    output_bytes: usize = 0,
+    listener_retry_at: i64 = 0,
 
     fn now(self: *Server) i64 {
         return std.Io.Clock.awake.now(self.io).toMilliseconds();
@@ -60,16 +68,27 @@ const Server = struct {
         return @divFloor(std.Io.Clock.real.now(self.io).toMilliseconds(), 1000);
     }
 
+    fn releaseTask(self: *Server, task: *requests.Task) void {
+        std.debug.assert(self.task_count > 0);
+        self.task_count -= 1;
+        task.destroy(self.allocator);
+    }
+
     fn closeClient(self: *Server, index: usize) void {
         const client = &self.clients[index];
         if (client.fd < 0) return;
         if (client.task) |task| {
             // Active database work and bcrypt completions retain their own task lifetime.
-            if (client.state == .queued) task.destroy(self.allocator);
+            if (client.state == .queued) self.releaseTask(task);
         }
         _ = c.close(client.fd);
+        self.input_bytes -= client.input.capacity;
         client.input.deinit(self.allocator);
-        if (client.output.len != 0) self.allocator.free(client.output);
+        if (client.output.len != 0) {
+            self.output_bytes -= client.output.len;
+            self.allocator.free(client.output);
+        }
+        self.scheduler.release(index);
         client.* = .{ .generation = client.generation +% 1 };
     }
 
@@ -80,31 +99,37 @@ const Server = struct {
             if (fd < 0) {
                 if (c.errno(fd) == .INTR) continue;
                 if (c.errno(fd) == .AGAIN) return;
+                if (c.errno(fd) == .MFILE or c.errno(fd) == .NFILE) {
+                    try self.loop.watch(self.listener, listener_token, false, false);
+                    self.listener_retry_at = self.now() + 250;
+                    return;
+                }
                 return error.Accept;
             }
-            const slot = for (self.clients, 0..) |client, i| {
-                if (client.state == .closed) break i;
-            } else {
+            const slot = self.scheduler.acquire() orelse {
                 _ = c.close(fd);
                 continue;
             };
             events.nonblocking(fd) catch {
                 _ = c.close(fd);
+                self.scheduler.release(slot);
                 continue;
             };
             events.noSigpipe(fd) catch {
                 _ = c.close(fd);
+                self.scheduler.release(slot);
                 continue;
             };
             self.clients[slot].fd = fd;
             self.clients[slot].state = .reading;
-            self.clients[slot].last_activity = self.now();
+            self.scheduler.schedule(slot, self.now() + 70_000);
             self.loop.watch(fd, self.token(slot), true, false) catch self.closeClient(slot);
         }
     }
 
     fn respond(self: *Server, index: usize, status: u16, body: []const u8) !void {
         const client = &self.clients[index];
+        if (self.output_bytes + body.len + 256 > max_output_bytes) return error.OutputBudget;
         const reason: []const u8 = switch (status) {
             200 => "OK",
             201 => "Created",
@@ -122,9 +147,10 @@ const Server = struct {
             try std.fmt.allocPrint(self.allocator, "HTTP/1.1 204 No Content\r\nConnection: {s}\r\n\r\n", .{if (client.keep_alive) @as([]const u8, "keep-alive") else "close"})
         else
             try std.fmt.allocPrint(self.allocator, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n{s}", .{ status, reason, body.len, if (client.keep_alive) @as([]const u8, "keep-alive") else "close", body });
+        self.output_bytes += client.output.len;
         client.sent = 0;
         client.state = .writing;
-        client.last_activity = self.now();
+        self.scheduler.schedule(index, self.now() + 9_000);
         try self.loop.watch(client.fd, self.token(index), false, true);
     }
 
@@ -144,6 +170,11 @@ const Server = struct {
                     try self.respond(index, 404, "{\"errors\":{\"body\":[\"route not implemented\"]}}");
                     return;
                 }
+                if (self.task_count == max_tasks) {
+                    consume(client, request.consumed);
+                    try self.respond(index, 503, "{\"errors\":{\"body\":[\"request capacity full\"]}}");
+                    return;
+                }
                 const task = requests.Task.create(self.allocator, request, .{ .index = index, .generation = client.generation }, self.secret, self.wallTime()) catch |err| {
                     consume(client, request.consumed);
                     if (err == error.InvalidPath) client.keep_alive = false;
@@ -152,6 +183,7 @@ const Server = struct {
                     return;
                 };
                 consume(client, request.consumed);
+                self.task_count += 1;
                 client.task = task;
                 if (task.needs_hash) self.startHash(task) else self.queue(task);
             },
@@ -169,8 +201,7 @@ const Server = struct {
         const index = task.recipient.index;
         const client = &self.clients[index];
         client.state = .queued;
-        self.sequence +%= 1;
-        client.sequence = self.sequence;
+        self.scheduler.enqueue(index);
         self.loop.watch(client.fd, self.token(index), false, false) catch self.closeClient(index);
     }
 
@@ -189,7 +220,7 @@ const Server = struct {
     }
 
     fn finish(self: *Server, task: *requests.Task, status: u16, body: []const u8) void {
-        defer task.destroy(self.allocator);
+        defer self.releaseTask(task);
         if (!self.isLive(task)) return;
         const index = task.recipient.index;
         self.clients[index].task = null;
@@ -210,7 +241,7 @@ const Server = struct {
         for (completed[0..count]) |job| {
             const task: *requests.Task = @fieldParentPtr("job", job);
             if (!self.isLive(task)) {
-                task.destroy(self.allocator);
+                self.releaseTask(task);
             } else if (!job.ok) {
                 self.finish(task, if (job.mode == .verify) 401 else 503, "{\"errors\":{\"body\":[\"password check failed\"]}}");
             } else if (job.mode == .verify) {
@@ -240,9 +271,15 @@ const Server = struct {
                 try self.respond(index, 413, "{\"errors\":{\"body\":[\"request buffer limit\"]}}");
                 return;
             }
+            const capacity = client.input.capacity;
             try client.input.appendSlice(self.allocator, buffer[0..len]);
+            self.input_bytes += client.input.capacity - capacity;
+            if (self.input_bytes > max_input_bytes) {
+                self.closeClient(index);
+                return;
+            }
             // A partial-request deadline is fixed at its first byte, not extended by trickles.
-            if (client.input.items.len == len) client.last_activity = self.now();
+            if (client.input.items.len == len) self.scheduler.schedule(index, self.now() + 9_000);
             try self.processInput(index);
             if (client.state != .reading) return;
         }
@@ -262,6 +299,7 @@ const Server = struct {
         }
         client.sent += @intCast(n);
         if (client.sent != client.output.len) return;
+        self.output_bytes -= client.output.len;
         self.allocator.free(client.output);
         client.output = &.{};
         if (!client.keep_alive) {
@@ -269,8 +307,9 @@ const Server = struct {
             return;
         }
         client.state = .reading;
-        client.last_activity = self.now();
+        self.scheduler.schedule(index, self.now() + @as(i64, if (client.input.items.len == 0) 70_000 else 9_000));
         if (client.input.items.len == 0) {
+            self.input_bytes -= client.input.capacity;
             client.input.deinit(self.allocator);
             client.input = .empty;
         }
@@ -303,11 +342,18 @@ const Server = struct {
         database.generation +%= 1;
         database.retry_at = self.now() + database.retry_delay;
         database.retry_delay = @min(database.retry_delay * 2, 5_000);
+        self.finishTagRequests(database, 503, "{\"errors\":{\"body\":[\"database unavailable\"]}}");
         if (database.active) |task| {
             database.active = null;
             // An uncertain write belongs to this failed connection, never the queue.
             self.finish(task, 503, "{\"errors\":{\"body\":[\"database unavailable\"]}}");
         }
+    }
+
+    fn finishTagRequests(self: *Server, database: *Database, status: u16, body: []const u8) void {
+        const count = database.tag_count;
+        database.tag_count = 0;
+        for (database.tag_requests[0..count]) |task| self.finish(task.?, status, body);
     }
 
     fn maintainDatabases(self: *Server, current: i64) void {
@@ -405,8 +451,9 @@ const Server = struct {
                     }
                 }
                 database.active = null;
+                if (task.route == .tags) self.finishTagRequests(database, task.status, if (task.status == 200) task.body.? else "{\"errors\":{\"body\":[\"query failed\"]}}");
                 if (!self.isLive(task)) {
-                    task.destroy(self.allocator);
+                    self.releaseTask(task);
                 } else if (task.status != 200) {
                     self.finish(task, task.status, "{\"errors\":{\"body\":[\"query failed\"]}}");
                 } else if (task.operation) |operation| {
@@ -475,11 +522,8 @@ const Server = struct {
 
     fn dispatch(self: *Server) !void {
         for (0..64) |_| {
-            var oldest: ?usize = null;
-            for (self.clients, 0..) |client, index| {
-                if (client.state == .queued and (oldest == null or client.sequence < self.clients[oldest.?].sequence)) oldest = index;
-            }
-            const index = oldest orelse return;
+            if (self.scheduler.head == scheduling.none) return;
+            const index: usize = self.scheduler.head;
             const task = self.clients[index].task.?;
             const slot = for (self.databases, 0..) |database, i| {
                 if (database.connection != null and database.active == null) break i;
@@ -487,13 +531,31 @@ const Server = struct {
                 // Wait only for ready, occupied owners. An entirely unavailable
                 // database fails unsent work promptly instead of hiding a backlog.
                 for (self.databases) |database| if (database.connection != null) return;
+                self.scheduler.unqueue(index);
                 self.finish(task, 503, "{\"errors\":{\"body\":[\"database unavailable\"]}}");
                 continue;
             };
+            self.scheduler.unqueue(index);
             const database = &self.databases[slot];
             self.clients[index].state = .database;
             database.active = task;
             database.active_since = self.now();
+            if (@import("build_options").tag_batch and task.route == .tags) {
+                // Capture only requests already waiting before execution. Nothing
+                // is added after dispatch, and no returned data survives the group.
+                var next = self.scheduler.head;
+                for (0..64) |_| {
+                    if (next == scheduling.none or database.tag_count == database.tag_requests.len) break;
+                    const candidate = next;
+                    next = self.scheduler.nodes[candidate].next;
+                    const other = &self.clients[candidate];
+                    if (other.task.?.route != .tags) continue;
+                    self.scheduler.unqueue(candidate);
+                    other.state = .database;
+                    database.tag_requests[database.tag_count] = other.task;
+                    database.tag_count += 1;
+                }
+            }
             task.send(database.connection.?) catch {
                 self.databaseFailed(slot);
                 continue;
@@ -508,7 +570,9 @@ const Server = struct {
         for (0..self.databases.len) |index| try self.watchDatabase(index, true, false);
         var ready: [128]events.Event = undefined;
         while (true) {
-            const count = try self.loop.wait(&ready);
+            const before = self.now();
+            const wait = self.scheduler.waitMilliseconds(before);
+            const count = try self.loop.wait(&ready, if (self.listener_retry_at == 0) wait else @min(wait, @as(c_int, @intCast(std.math.clamp(self.listener_retry_at - before, 0, 1000)))));
             for (ready[0..count]) |event| {
                 if (event.token == listener_token) {
                     try self.acceptClients();
@@ -539,15 +603,46 @@ const Server = struct {
                 if (event.writable and client.state == .writing) self.writeClient(index) catch self.closeClient(index);
             }
             const current = self.now();
-            for (self.clients, 0..) |client, index| {
-                const limit: i64 = if (client.state == .reading and client.input.items.len == 0) 70_000 else 9_000;
-                if (client.state != .closed and current - client.last_activity > limit) self.closeClient(index);
+            // Closing a mass of expired sockets is bounded per turn so database
+            // and active-client events keep making progress.
+            for (0..512) |_| {
+                const expired = self.scheduler.expired(current) orelse break;
+                self.closeClient(expired);
             }
             self.maintainDatabases(current);
+            if (self.listener_retry_at != 0 and current >= self.listener_retry_at) {
+                self.listener_retry_at = 0;
+                try self.loop.watch(self.listener, listener_token, true, false);
+            }
             try self.dispatch();
         }
     }
 };
+
+extern "c" fn sysctlbyname([*:0]const u8, ?*anyopaque, ?*usize, ?*const anyopaque, usize) c_int;
+
+fn clientCapacity() !usize {
+    var limit: c.rlimit = undefined;
+    if (c.getrlimit(.NOFILE, &limit) != 0) return error.FileDescriptorLimit;
+    const reserve = database_connections + 32;
+    var desired: usize = max_clients + reserve;
+    if (@import("builtin").os.tag == .macos) {
+        var kernel_limit: c_int = 0;
+        var length: usize = @sizeOf(c_int);
+        // Read the existing ceiling; do not change any host/kernel setting.
+        if (sysctlbyname("kern.maxfilesperproc", &kernel_limit, &length, null, 0) == 0 and kernel_limit > 0)
+            desired = @min(desired, @as(usize, @intCast(kernel_limit)));
+    }
+    desired = @min(desired, limit.max);
+    if (limit.cur < desired) {
+        var raised = limit;
+        raised.cur = desired;
+        if (c.setrlimit(.NOFILE, &raised) == 0) limit = raised;
+    }
+    const available = @min(desired, limit.cur);
+    if (available < reserve + 256) return error.FileDescriptorLimit;
+    return @min(max_clients, available - reserve);
+}
 
 fn listen(host: []const u8, port: u16) !c_int {
     var address: c.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = 0 };
@@ -563,7 +658,7 @@ fn listen(host: []const u8, port: u16) !c_int {
     const one: c_int = 1;
     if (c.setsockopt(fd, c.SOL.SOCKET, c.SO.REUSEADDR, &one, @sizeOf(c_int)) < 0) return error.SocketOption;
     if (c.bind(fd, @ptrCast(&address), @sizeOf(@TypeOf(address))) < 0) return error.Bind;
-    if (c.listen(fd, 256) < 0) return error.Listen;
+    if (c.listen(fd, 4096) < 0) return error.Listen;
     return fd;
 }
 
@@ -575,7 +670,8 @@ pub fn main(init: std.process.Init) !void {
     const host = env.getPosix("HOST") orelse "127.0.0.1";
     const port = try std.fmt.parseInt(u16, env.getPosix("PORT") orelse "3000", 10);
     const allocator = init.gpa;
-    const clients = try allocator.alloc(Client, max_clients);
+    const capacity = try clientCapacity();
+    const clients = try allocator.alloc(Client, capacity);
     defer allocator.free(clients);
     @memset(clients, .{});
     var pool: bcrypt.Pool = .{};
@@ -594,12 +690,15 @@ pub fn main(init: std.process.Init) !void {
         if (database.connection) |connection| pg.PQfinish(connection);
         if (database.opening) |opening| pg.PQfinish(opening.conn);
         if (database.active) |task| task.destroy(allocator);
+        for (database.tag_requests[0..database.tag_count]) |task| task.?.destroy(allocator);
     };
     for (&databases) |*database| database.connection = try pg.connect(url, init.io);
     var loop = try events.Loop.init();
     defer loop.deinit();
     const listener = try listen(host, port);
     defer _ = c.close(listener);
+    var scheduler = try scheduling.Scheduler.init(allocator, capacity);
+    defer scheduler.deinit(allocator);
     var server: Server = .{
         .allocator = allocator,
         .io = init.io,
@@ -610,15 +709,17 @@ pub fn main(init: std.process.Init) !void {
         .clients = clients,
         .pool = &pool,
         .secret = secret,
+        .scheduler = scheduler,
     };
     defer {
         for (0..clients.len) |index| server.closeClient(index);
     }
-    std.log.info("all API routes on {s}:{d}; {d} database connections, two bcrypt workers, prepared API queries: {}", .{ host, port, database_connections, pg.prepared_queries });
+    std.log.info("all API routes on {s}:{d}; {d} database connections, {d} client slots, {d} bcrypt workers, prepared API queries: {}", .{ host, port, database_connections, capacity, bcrypt.worker_count, pg.prepared_queries });
     try server.run();
 }
 
 test {
+    _ = scheduling;
     _ = http;
     _ = @import("auth.zig");
     _ = bcrypt;

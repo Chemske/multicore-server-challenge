@@ -67,9 +67,15 @@ pub const Connector = struct {
                     // Bound abandoned backend work as well as the reactor's own
                     // deadline. This SET affects only the connection I own.
                     if (PQsendQueryParams(self.conn, "SET statement_timeout = '8s'", 0, null, null, null, null, 0) != 1) return error.DatabasePrepare;
+                } else if (self.query_index < 3) {
+                    const setting = if (self.query_index == 1) "SET jit = off" else if (@import("build_options").generic_plans)
+                        "SET plan_cache_mode = force_generic_plan"
+                    else
+                        "SET plan_cache_mode = auto";
+                    if (PQsendQueryParams(self.conn, setting, 0, null, null, null, null, 0) != 1) return error.DatabasePrepare;
                 } else {
                     if (!prepared_queries) return .{ .ready = true };
-                    const item = prepareItem(self.query_index - 1) orelse return .{ .ready = true };
+                    const item = prepareItem(self.query_index - 3) orelse return .{ .ready = true };
                     if (PQsendPrepare(self.conn, item.name.ptr, item.sql.ptr, 0, null) != 1) return error.DatabasePrepare;
                 }
                 self.waiting = true;
@@ -122,6 +128,7 @@ fn querySql(route: http.Route, read: ?articles.Read) [:0]const u8 {
         .profile => profiles.get_sql,
         .follow => profiles.follow_sql,
         .unfollow => profiles.unfollow_sql,
+        .comments => operations.list_comments_sql,
         else => unreachable,
     };
 }
@@ -134,7 +141,7 @@ fn statementName(route: http.Route, read: ?articles.Read) [:0]const u8 {
 }
 
 fn prepareItem(index: usize) ?struct { name: [:0]const u8, sql: [:0]const u8 } {
-    const routes = [_]http.Route{ .tags, .register, .login, .current, .update, .profile, .follow, .unfollow };
+    const routes = [_]http.Route{ .tags, .register, .login, .current, .update, .profile, .follow, .unfollow, .comments };
     if (index < routes.len) return .{ .name = statementName(routes[index], null), .sql = querySql(routes[index], null) };
     const offset = index - routes.len;
     if (offset >= 11) return null;
@@ -313,30 +320,31 @@ fn identifier(result: *Result, allocator: std.mem.Allocator) !?[:0]const u8 {
     return try allocator.dupeSentinel(u8, value, 0);
 }
 
-fn commentRows(result: *Result, allocator: std.mem.Allocator, single: bool) ![]operations.Comment {
-    if (PQresultStatus(result) != 2 or PQnfields(result) != 8) return error.DatabaseResult;
+fn commentRows(result: *Result, allocator: std.mem.Allocator, single: bool, offset: c_int) ![]operations.Comment {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != 8 + offset) return error.DatabaseResult;
     const count: usize = @intCast(PQntuples(result));
     if (count > @as(usize, if (single) 1 else 100)) return error.DatabaseResult;
+    if (offset == 1 and count == 1 and PQgetisnull(result, 0, 1) != 0) return &.{};
     const comments = try allocator.alloc(operations.Comment, count);
     var total: usize = 0;
     for (comments, 0..) |*comment, index| {
         const row: c_int = @intCast(index);
         for (0..8) |column| {
-            total += @intCast(PQgetlength(result, row, @intCast(column)));
+            total += @intCast(PQgetlength(result, row, @as(c_int, @intCast(column)) + offset));
             if (total > 4 * 1024 * 1024) return error.ResponseTooLarge;
         }
-        const id = std.fmt.parseInt(i64, try required(result, row, 0), 10) catch return error.DatabaseResult;
+        const id = std.fmt.parseInt(i64, try required(result, row, offset + 0), 10) catch return error.DatabaseResult;
         if (id <= 0) return error.DatabaseResult;
         comment.* = .{
             .id = id,
-            .body = try textCell(result, row, 1, allocator),
-            .createdAt = try textCell(result, row, 2, allocator),
-            .updatedAt = try textCell(result, row, 3, allocator),
+            .body = try textCell(result, row, offset + 1, allocator),
+            .createdAt = try textCell(result, row, offset + 2, allocator),
+            .updatedAt = try textCell(result, row, offset + 3, allocator),
             .author = .{
-                .username = try textCell(result, row, 4, allocator),
-                .bio = try nullableCell(result, row, 5, allocator),
-                .image = try nullableCell(result, row, 6, allocator),
-                .following = try boolean(result, row, 7),
+                .username = try textCell(result, row, offset + 4, allocator),
+                .bio = try nullableCell(result, row, offset + 5, allocator),
+                .image = try nullableCell(result, row, offset + 6, allocator),
+                .following = try boolean(result, row, offset + 7),
             },
         };
     }
@@ -352,7 +360,7 @@ pub fn operationResult(result: *Result, operation: *operations.Operation, alloca
         .mutate => switch (operation.kind) {
             .favorite, .unfavorite => operation.id = (try identifier(result, allocator)) orelse return 404,
             .create_comment => {
-                operation.comments = try commentRows(result, allocator, true);
+                operation.comments = try commentRows(result, allocator, true, 0);
                 if (operation.comments.len != 1) return error.DatabaseResult;
             },
             .update_article, .delete_article, .delete_comment => {
@@ -368,7 +376,12 @@ pub fn operationResult(result: *Result, operation: *operations.Operation, alloca
             operation.article = try articlePage(result, allocator, true);
             if (operation.article.len == 0) return 404;
         },
-        .comment_rows => operation.comments = try commentRows(result, allocator, false),
+        .comment_rows => {
+            if (PQresultStatus(result) != 2 or PQnfields(result) != 9) return error.DatabaseResult;
+            if (PQntuples(result) == 0) return 404;
+            if (PQgetisnull(result, 0, 0) != 0) return error.DatabaseResult;
+            operation.comments = try commentRows(result, allocator, false, 1);
+        },
     }
     return 200;
 }

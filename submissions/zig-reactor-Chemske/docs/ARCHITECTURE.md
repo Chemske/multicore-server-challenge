@@ -1,65 +1,53 @@
-# Proposed architecture
+# Architecture
 
-Status: target design. One reactor now owns a bounded pool of independently progressing database connections, with four as the measured local default and one retained as a control. Every API route passes development-seed conformance. The original API path prepares nineteen fixed statements per connection; the later article/comment state machine retains parameterized single-query execution. Replacement connections rebuild session settings and statements without replaying requests. Multiple shards, batching and pipelines remain planned. I keep the unbatched execution path as the correctness and measurement control.
+I use one readiness-driven Zig reactor for HTTP and four independently progressing PostgreSQL owners. Bcrypt runs in a separate bounded worker pool. The same application uses kqueue on macOS and epoll on Linux; no thread is created per client. All API routes pass the unchanged conformance suite on both development and full seeds on the native Mac. Linux runtime validation remains outstanding.
 
-## Ownership and flow
+## Ownership and request flow
 
-Each reactor shard owns its HTTP connections, PostgreSQL connections, queues and active response buffers. A connection stays with its owner. The macOS backend uses kqueue; the Linux backend uses epoll. Platform code is restricted to readiness events, wakeups, sockets and timers wherever possible. I will not assume identical SO_REUSEPORT behaviour across operating systems.
+The request path is receive/frame HTTP → validate input and authentication → enqueue a typed operation → dispatch SQL → consume and validate all results → confirm commit where required → serialize/send → release storage.
 
-The request path is: receive and frame HTTP → validate input and authentication → enqueue a typed operation → dispatch prepared SQL → consume and validate its result → wait for commit where required → serialize and send → release request storage.
+A database owner retains its operation through every query, commit and rollback. Only the reactor manipulates its PGconn. libpq connection establishment, output flushing and input consumption advance from socket readiness. Results and parameter storage have explicit lifetimes; borrowed PGresult strings cannot survive its release. A disconnected recipient does not release an operation still owned by PostgreSQL or bcrypt. Generation-tagged HTTP and database slots reject stale completions and readiness events.
 
-Native bring-up uses one shard. Worker and connection counts are measured choices rather than one worker per CPU. Database connections across all shards must remain at or below 95. The current pool assigns an entire operation to one owner; dedicated read/write pools remain a later experiment. Neither path uses a thread per client.
+The checked build-time database range is 1–95; four is the local measured default. More connections can take CPU away from PostgreSQL on the shared benchmark host. There is no separate write pool, pipeline or speculative retry.
 
-The reactor monitors libpq's socket. It advances connection establishment, flushes output when writable, and consumes input when readable. No blocking `PQexec` belongs on the event-loop path. A PGconn has exactly one manipulating owner. Results and parameter storage have explicit lifetimes; strings borrowed from a PGresult cannot survive its release.
+## Connection scheduling and resource bounds
 
-## HTTP lifecycle
+The configured HTTP ceiling is 131,072. Startup reads the process descriptor limits, reserves database/control descriptors and raises only its own soft limit when the existing hard limit permits it. On macOS it also reads the existing kernel ceiling without changing it. The effective limit on my Mac is 10,204 with four database owners. This is not evidence of 100,000 real connections on Linux.
 
-Picohttpparser parses headers; my layer owns framing and policy. I will enforce consistent Content-Length/Transfer-Encoding handling, bounds on headers and bodies, correct partial-read behaviour, ordered responses and safe handling of pipelined bytes. Chunked bodies must either be supported correctly or rejected explicitly without reinterpreting their bytes as another request. Ambiguous framing is rejected and the connection closed.
+A linked free list allocates/releases slots in constant time. An intrusive FIFO adds/removes queued requests in constant time. An indexed min-heap holds one deadline per live socket, with logarithmic updates/cancellation. The loop no longer scans all clients on every turn. Deadline expiry closes at most 512 sockets per turn; accepts are limited to 64 per turn. Descriptor exhaustion pauses listener admission for 250 ms while existing work progresses.
 
-Only active or incomplete requests own substantial buffers. Idle connections retain a compact state record. Slow output is registered for write readiness rather than blocking a shard. Request deadlines, idle deadlines and response sizes are bounded. Disconnects detach the HTTP recipient but do not allow an in-flight database connection to be reused before its results have been drained or the connection replaced.
+Idle connections retain a compact record and release their input allocation. Limits are 2,048 admitted request tasks, 32 MiB aggregate allocated input buffers, and 64 MiB aggregate framed responses. These aggregate buffer limits do not include kernel socket memory, task arenas, libpq or thread stacks. Per-request limits remain 16 KiB headers, 64 KiB bodies, 84 KiB buffered input and 4 MiB article retained fields/serialized output. Individual violations return an error or close the socket; overload remains counted in benchmarks.
 
-Connection IDs include a generation so a late database or bcrypt completion cannot target a recycled socket slot. One request in progress per connection is the initial execution policy; already received subsequent bytes remain framed and ordered.
+Idle sockets expire after 70 seconds. The nine-second partial-request deadline starts at the first byte and is not renewed by trickled bytes. Queued/active work retains a deadline; sending a response has its own nine-second bound. Each database session has an eight-second statement timeout and reconnect setup has a twenty-second deadline.
 
-## Read scheduling
+Picohttpparser parses headers; my layer owns framing, Content-Length/Transfer-Encoding policy and ordered keep-alive responses. Ambiguous framing and chunked bodies are rejected and the connection closed. One request executes per HTTP connection while already received pipelined bytes remain ordered. Slow output uses write readiness.
 
-Pending reads are grouped by query family. A dispatch takes requests already queued before execution, with a bounded maximum. There is no artificial collection timer in the initial design. When little work is waiting, the batch contains one request.
+## SQL and read groups
 
-Choose among families using oldest waiting work and bounded per-family occupancy. Avoid filling a long pipeline behind an expensive feed query. Compare an unbatched prepared path, SQL batching, and limited pipelining separately before combining them.
+Twenty fixed queries are prepared separately on each connection. The later mutation state machine retains parameterized single-query execution. Setup fully drains each session command and preparation before admitting the connection. Replacements rebuild this state. Session-only plan/JIT choices and their comparison controls are described in PERFORMANCE.md; no role, database or server-wide tuning is applied.
 
-Every row is associated with a request ordinal. Empty result sets and empty list pages still need a completion and the correct count. Per-request validation, identity and viewer flags remain distinct. No database result or rendered response is retained for requests that arrive after dispatch.
+Article lists select page IDs in descending order before enrichment, then issue a separate capped count. This retains the reference's page-then-count statement snapshots. Counts stop at 1,000 without hiding accessible pages beyond that offset. Filter precedence, nullable fields, viewer flags and UTC millisecond formatting are explicit. Every request reads current data from PostgreSQL.
 
-Candidate SQL work: select page IDs before enrichment; preserve capped counts; share repeated viewer-independent work inside the statement; compute favourited/following per viewer; use a separate path for query families whose batches cost more than they save. Preserve exact ordering, filter precedence, nullable fields and timestamp formatting.
+Comment lists use one prepared statement: article lookup plus a lateral newest-100 comment/author query. A leading article ID distinguishes a missing article (404) from an existing article without comments (200 with an empty list). The outer order explicitly preserves creation time and ID descending. Compared with the reference's separate lookup/read, this uses one statement snapshot; a simultaneous article deletion may therefore be observed differently. Ordinary API responses match the reference on both seeds.
 
-Batch statements share a snapshot. I will document the resulting consistency semantics and verify API behaviour rather than claiming that sequential and concurrent executions are universally identical. Prepared generic/custom plans and session-only settings are measured per statement, not enabled blindly.
+When the oldest queued task is a tags read, dispatch can gather up to 31 compatible reads from at most the next 64 already queued tasks. It executes one tags query for that closed group. Each recipient keeps its own connection, framing, deadline and lifetime. No collection delay is added, and no request can join after dispatch. Results are released when the group completes; a later request always executes a new query. The unbatched control remains available with `-Dtag-batch=false`.
 
-## Writes and commit boundaries
+A group's reads share one PostgreSQL snapshot. Success/error is delivered to all captured recipients after the command is fully drained. Followers are finished before the primary task's response arena is released, including when the primary disconnects. A connection failure returns 503 to the group without replay. No result or rendered-response cache survives a group. Tests count actual wire executions, check post-dispatch freshness and inject SQL failure.
 
-The first write path executes isolated transactions and responds only after confirmed commit. Article/tag creation remains atomic. Ownership checks, expected unique violations and not-found results retain the required API semantics.
+## Writes and durable responses
 
-Group commit is a later optimisation. Requests already waiting may share a transaction, but each response waits for successful commit acknowledgement. Expected-conflict operations may be kept separate initially. A failed group must be fully rolled back and drained before individual retries. Retry only where the rollback outcome is known and the error is eligible, with bounded retries.
+Article creation keeps its article, distinct tags and links inside an explicit transaction, confirms COMMIT, then reads the committed article by ID. New/concurrent tag upserts use a subsequent statement to avoid the data-modifying-CTE snapshot trap. Ownership predicates belong in update/delete statements. Favourites and follows are idempotent; deletion returns a bodyless 204.
 
-Connection loss during commit means the outcome may be unknown. I will not replay the write automatically. An HTTP client disconnect does not undo an already committed operation. Data-modifying CTEs do not automatically expose their new rows through ordinary table scans; response queries must respect statement snapshots and read-after-commit requirements.
+Ordinary errors are drained and explicit transactions roll back before reuse. A failed rollback or uncertain boundary retires the owner. A lost COMMIT acknowledgement may mean the write succeeded: the server returns 503 and never replays it. Responses are not sent speculatively, and durable commit settings are unchanged. Group commit was not selected in this round; the transaction path retains its existing failure guarantees.
 
-## Authentication and expensive work
+## Authentication
 
-Use HS256 with strict algorithm, signature, expiry and claim validation on every applicable request. The issued token has exactly the required subject and timestamps. Optional auth distinguishes an absent token from an invalid one; no-auth routes follow their own contract.
+HS256 signature, algorithm, subject and expiry are checked on every applicable request. Optional auth distinguishes an absent token from a present invalid token. Bcrypt verifies the current stored hash on every login; new hashes use cost 10 and fresh random salts. There is no identity, password or verification cache. The worker budget is selected by measurement; at most 64 jobs, including running/completed jobs awaiting collection, are outstanding. Saturation returns 503 and is retained in load results.
 
-Bcrypt uses cost 10 and fresh salts. Verification runs on every login. Its queue and worker budget are bounded and separate from socket progress. Start with standard-library bcrypt and test compatibility with seeded hashes and the API's password-length rules. No verification cache and no initial assembly path.
+The bcrypt adapter normalizes only a corrected Go `$2a$10$` marker to Zig's `$2b$10$` rendering before the full bcrypt calculation. Registration rejects passwords above 72 bytes, while verification follows Go's truncation behaviour. Password buffers are cleared after work.
 
-## Errors, overload and recovery
+## Recovery and portability
 
-Every queue, batch and in-flight set has limits on count and retained bytes, with request age/deadlines considered before dispatch. Overload is visible and measured; I will not call a run successful by omitting failed requests. PostgreSQL failures are drained to a known protocol boundary or the connection is replaced. Reconnection rebuilds prepared statements and session settings. Request arguments and credentials never enter routine logs.
+Each failed owner reconnects independently with 250 ms–5 s exponential backoff. Healthy owners continue. Unsent work fails promptly if no usable database connection remains. The numeric loopback benchmark address avoids potentially blocking DNS inside libpq. See RECOVERY.md for the fault matrix and uncertain-commit proof.
 
-HTTP error mapping follows the conformance suite. Transaction failures must not leak aborted state into another request. A single lost backend should not corrupt other connection owners or misroute completions.
-
-## First implementation gates
-
-1. Project-contained PostgreSQL 18 and libpq available; toolchain and parser source pinned.
-2. Non-blocking native connection/query proof, then an HTTP tags endpoint that actually queries PostgreSQL.
-3. Single-request execution, remaining endpoints and unchanged conformance.
-4. Protocol, concurrency, rollback and recovery tests.
-5. Read batches with differential checks; repeated A/B measurements.
-6. Group commit and bcrypt improvements only when justified by profiling.
-7. Linux CI and clean installation checks; official benchmark submission later.
-
-The planned source areas are platform, reactor, HTTP, auth, PostgreSQL, scheduler, SQL, serialization and API handlers. This document does not create those modules or imply they already work.
+Source and native correctness checks do not validate epoll runtime, the Ubuntu installer, target descriptor limits or official capacity. Those are explicit final-check requirements. The source-built libpq and compiler installer target Ubuntu only and are never run on my Mac.

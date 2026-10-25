@@ -34,7 +34,7 @@ def mint(identifier, secret, expiry=None):
 
 
 class Server:
-    def __init__(self, results, secret, prefix, label, executable, database_port=None):
+    def __init__(self, results, secret, prefix, label, executable, database_port=None, template='conduit_dev'):
         self.results = results
         self.secret = secret
         self.database = f'challenge_{prefix}_{label}_{os.getpid()}'
@@ -43,9 +43,11 @@ class Server:
         self.process = None
         self.log = None
         self.database_port = database_port
+        assert template in ('conduit_dev', 'conduit_seed')
+        self.template = template
 
     def __enter__(self):
-        sql(f'CREATE DATABASE {self.database} TEMPLATE conduit_dev')
+        sql(f'CREATE DATABASE {self.database} TEMPLATE {self.template}')
         try:
             self.log = (self.results / f'{self.database}.log').open('w')
             database_port = self.database_port or os.environ['PGPORT']

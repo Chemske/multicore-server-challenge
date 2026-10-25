@@ -83,7 +83,7 @@ class Proxy:
                 if client is not None:
                     client.close()
                 continue
-            session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'pause': self.pause_new}
+            session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'pause': self.pause_new}
             self.sessions.append(session)
             self.launch(self.frontend, session)
             self.launch(self.backend, session)
@@ -110,6 +110,10 @@ class Proxy:
                         session['prepared'].add(name.decode('ascii'))
                     elif statement.startswith(b"SET statement_timeout = '8s'\0"):
                         session['settings'] += 1
+                    elif statement.startswith(b'SET jit = off\0') or statement.startswith(b'SET plan_cache_mode = '):
+                        session['tuning'].add(statement.split(b'\0', 1)[0])
+                elif header[:1] == b'B' and body.split(b'\0', 2)[1] == b'tags':
+                    session['tags'] += 1
                 backend.sendall(header + body)
         except (OSError, EOFError):
             pass
@@ -147,10 +151,11 @@ class Proxy:
 
 
 @contextmanager
-def lock_tags(server):
+def lock_tags(server, mode='SHARE', table='tags'):
+    assert mode in ('SHARE', 'ACCESS EXCLUSIVE') and table in ('tags', 'articles')
     with (results / 'locker.log').open('a') as log:
         process = subprocess.Popen(['psql', '-X', '-v', 'ON_ERROR_STOP=1', '-d', server.database,
-                                    '-c', 'BEGIN; LOCK TABLE tags IN SHARE MODE; SELECT pg_sleep(30); ROLLBACK'],
+                                    '-c', f'BEGIN; LOCK TABLE {table} IN {mode} MODE; SELECT pg_sleep(30); ROLLBACK'],
                                    env=dict(os.environ, PGAPPNAME='recovery-lock'), stdout=log, stderr=log)
         try:
             eventually(lambda: sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{server.database}' AND application_name='recovery-lock' AND wait_event='PgSleep'") == '1')
@@ -183,10 +188,10 @@ def main():
             eventually(lambda: len(proxy.sessions) >= after)
             eventually(ready)
             idle()
-            eventually(lambda: all(len(s['prepared']) == 19 and s['settings'] == 1 for s in proxy.sessions[-connection_count:]))
+            eventually(lambda: all(len(s['prepared']) == 20 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
 
         rebuilt(connection_count)
-        checks.append('all owners finish session setup and nineteen named preparations before use')
+        checks.append('all owners finish session setup and twenty named preparations before use')
         accepted = len(proxy.sessions)
         kill(one=True)
         rebuilt(accepted + 1)
