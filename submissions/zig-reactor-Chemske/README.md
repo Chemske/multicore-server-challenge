@@ -6,7 +6,7 @@ Front: direct
 
 I am building a Conduit implementation for the Multicore Server Challenge, targeting the highest sustainable official score. My development environment is native macOS on Apple Silicon. I keep the toolchain, database, caches and generated files within one project workspace wherever the tools allow it.
 
-The first implementation is a small event-driven Zig server using the official PostgreSQL client library in non-blocking mode. It serves the complete Conduit API directly over HTTP/1.1, including article writes, favourites and comments. Query batching, reconnection and clean Linux installation remain planned.
+The implementation is a small event-driven Zig server using the official PostgreSQL client library in non-blocking mode. It serves the complete Conduit API directly over HTTP/1.1, including article writes, favourites and comments. Nineteen fixed queries on the original API path are prepared per connection; the article/comment operation state machine still uses its original parameterized statements. Query batching, reconnection and clean Linux installation remain planned.
 
 The central idea is simple: **make each request create less work for the whole machine, especially PostgreSQL.** More threads are not automatically more useful when the application and database share eight CPUs.
 
@@ -17,7 +17,7 @@ The central idea is simple: **make each request create less work for the whole m
 | Application | Zig 0.17.0 |
 | Networking | Small Zig reactor; kqueue on macOS, epoll on Linux |
 | HTTP parsing | Vendored picohttpparser at 465a7ff09fbd3432fe56c673451f5460154d1f07 |
-| PostgreSQL | PostgreSQL/libpq 18.6; asynchronous single-query path implemented, pipeline mode planned |
+| PostgreSQL | PostgreSQL/libpq 18.6; asynchronous named prepared queries, pipeline mode planned |
 | Authentication | HS256 on every authenticated request; bcrypt cost 10 in two bounded workers |
 | Deployment | Direct HTTP; official Ubuntu 24.04 x86_64 runtime contract |
 
@@ -67,6 +67,7 @@ Choose an unused port so the runner's disposable server does not share the inter
 - [Research and selection](docs/RESEARCH.md): evidence, alternatives, uncertainties and the case for this architecture.
 - [Competitor source review](docs/COMPETITOR_REVIEW.md): leading implementations, reproduced parser observations and specific improvement opportunities.
 - [Architecture](docs/ARCHITECTURE.md): ownership, scheduling, batching and correctness boundaries.
+- [Performance experiments](docs/PERFORMANCE.md): current rules/leaderboard recheck and reproducible local A/B measurements.
 - [Development and cleanup](docs/DEVELOPMENT.md): native Mac setup policy, milestone gates and removal inventory.
 
 ## Current validation
@@ -81,7 +82,7 @@ A blocked update is tested to withhold success until the lock is released and th
 
 Profile reads query the current relationship for the requesting viewer. Follow and unfollow each use one parameterized statement with a target lookup and data-modifying CTE. Their responses wait for transaction completion, including deferred commit errors. Repeated operations keep the requested following state. Tests cover external changes, concurrent duplicates, blocked writes and a deferred commit failure that rolls back the inserted relation.
 
-All 16 reached normalized profile responses match the unchanged Go reference, which passes all 197 steps on a separate fresh clone. One deliberate difference outside that transcript follows the specification: a present empty Authorization header returns 401. The Go reference treats that header as absent. Dynamic usernames are decoded once as path segments, preserving literal plus signs and encoded separators.
+All 18 normalized profile responses match the unchanged Go reference, which passes all 197 steps on a separate fresh clone. One deliberate difference outside that transcript follows the specification: a present empty Authorization header returns 401. The Go reference treats that header as absent. Dynamic usernames are decoded once as path segments, preserving literal plus signs and encoded separators.
 
 Article lists select page IDs in descending order before enrichment, then run a separate capped count, preserving the reference's statement order and snapshot behaviour. Counts stop at 1,000 without limiting which pages are accessible. Tag, author and favourited filters have the required precedence; unknown filters produce empty lists. Every request computes viewer-dependent flags from the database. Single articles include body; list objects omit it. Zig serializes JSON and decodes PostgreSQL text arrays; SQL formats UTC timestamps with three truncated fractional digits.
 
@@ -92,6 +93,8 @@ Article creation keeps its article, distinct tags and tag links inside one expli
 The write checks inject tag/link and deferred-commit failures, block a transaction mid-write, and verify that no partial article is visible. Eight simultaneous Zig/Go creates on the same disposable database all link the same new tag correctly. Tests also cover 64 repeated favourite writes, concurrent comments, cascade deletion, disconnects and backend loss. If a write commits but its follow-up read fails, the response is 503 and the write is never automatically replayed.
 
 The Linux source path passes object-only cross-compilation; no linked Linux server has been run. There are no official scores.
+
+The first local performance experiment compares named prepared queries with the previous unprepared build. Across three runs of each on fresh development-seed clones, median throughput increased from 3,055.7 to 4,523.6 requests/s (+48.0%), and median p95 decreased from 35.615 to 17.471 ms. All 687,440 measured requests succeeded. The six-core Apple Silicon Mac with 8 GiB RAM also ran the generator and PostgreSQL; each run measured thirty seconds with accelerated think/session times. This selects a local candidate and does not establish official capacity. Complete settings, per-run results and limitations are in [PERFORMANCE.md](docs/PERFORMANCE.md). `-Dprepared-queries=false` retains an unprepared control; PostgreSQL's plan-selection heuristic remains unchanged.
 
 Current limits are deliberate: one database connection, 256 client slots, two bcrypt workers and at most 16 outstanding password jobs. Headers are limited to 16 KiB, bodies to 64 KiB and total buffered request data to 84 KiB. Chunked bodies are rejected and the connection closed. Idle clients have a 70-second timeout; active requests and database work have deadlines. A query error is drained and the connection can be reused; a lost database connection puts the service into 503 mode until restart. Reconnects, batching and the Ubuntu install script remain future work. Article reads have a 4 MiB retained-field and serialized-response bound; larger results return 503.
 

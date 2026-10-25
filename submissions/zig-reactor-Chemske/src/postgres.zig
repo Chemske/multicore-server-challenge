@@ -4,6 +4,7 @@ const http = @import("http.zig");
 const profiles = @import("profiles.zig");
 const articles = @import("articles.zig");
 const operations = @import("operations.zig");
+pub const prepared_queries = @import("build_options").prepared_queries;
 
 // Minimal declarations from PostgreSQL 18's public libpq-fe.h ABI.
 pub const Conn = opaque {};
@@ -15,6 +16,8 @@ extern "c" fn PQsetnonblocking(*Conn, c_int) c_int;
 pub extern "c" fn PQfinish(*Conn) void;
 pub extern "c" fn PQtransactionStatus(*const Conn) c_int;
 extern "c" fn PQsendQueryParams(*Conn, [*:0]const u8, c_int, ?[*]const u32, ?[*]const ?[*:0]const u8, ?[*]const c_int, ?[*]const c_int, c_int) c_int;
+extern "c" fn PQsendPrepare(*Conn, [*:0]const u8, [*:0]const u8, c_int, ?[*]const u32) c_int;
+extern "c" fn PQsendQueryPrepared(*Conn, [*:0]const u8, c_int, ?[*]const ?[*:0]const u8, ?[*]const c_int, ?[*]const c_int, c_int) c_int;
 pub extern "c" fn PQflush(*Conn) c_int;
 pub extern "c" fn PQconsumeInput(*Conn) c_int;
 pub extern "c" fn PQisBusy(*Conn) c_int;
@@ -37,6 +40,7 @@ pub fn connect(url: [*:0]const u8, io: std.Io) !*Conn {
         if (state == 0) return error.DatabaseConnect;
         if (state == 3) {
             if (PQsetnonblocking(conn, 1) != 0) return error.DatabaseNonblocking;
+            if (prepared_queries) try prepareQueries(conn, io, deadline);
             return conn;
         }
         const fd = PQsocket(conn);
@@ -47,17 +51,8 @@ pub fn connect(url: [*:0]const u8, io: std.Io) !*Conn {
     return error.DatabaseConnectTimeout;
 }
 
-pub fn query(conn: *Conn, route: http.Route, params: []const ?[:0]const u8, read: ?articles.Read) !void {
-    var actual = params;
-    const statement: [:0]const u8 = if (read) |r| blk: {
-        if (r.phase == .count) actual = switch (r.family) {
-            .all => &.{},
-            .feed => params[0..1],
-            .single => unreachable,
-            else => params[3..4],
-        };
-        break :blk r.statement();
-    } else switch (route) {
+fn querySql(route: http.Route, read: ?articles.Read) [:0]const u8 {
+    return if (read) |r| r.statement() else switch (route) {
         .tags => "SELECT name FROM tags ORDER BY name",
         .register => "INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email, bio, image",
         .login => "SELECT id, username, email, bio, image, password_hash FROM users WHERE email = $1",
@@ -68,7 +63,68 @@ pub fn query(conn: *Conn, route: http.Route, params: []const ?[:0]const u8, read
         .unfollow => profiles.unfollow_sql,
         else => unreachable,
     };
-    try send(conn, statement, actual);
+}
+
+fn statementName(route: http.Route, read: ?articles.Read) [:0]const u8 {
+    const r = read orelse return @tagName(route);
+    const pages = [_][:0]const u8{ "page_all", "page_tag", "page_author", "page_favorited", "page_feed", "page_single" };
+    const counts = [_][:0]const u8{ "count_all", "count_tag", "count_author", "count_favorited", "count_feed" };
+    return if (r.phase == .page) pages[@backingInt(r.family)] else counts[@backingInt(r.family)];
+}
+
+fn prepareQueries(conn: *Conn, io: std.Io, deadline: i64) !void {
+    // Startup only: every name belongs to this PGconn and dies with it. PostgreSQL
+    // keeps its default generic/custom-plan heuristic; no data or auth is cached.
+    for ([_]http.Route{ .tags, .register, .login, .current, .update, .profile, .follow, .unfollow }) |route| {
+        try prepare(conn, statementName(route, null), querySql(route, null), io, deadline);
+    }
+    for (std.enums.values(articles.Family)) |family| {
+        var read: articles.Read = .{ .family = family };
+        try prepare(conn, statementName(.articles, read), read.statement(), io, deadline);
+        if (family != .single) {
+            read.phase = .count;
+            try prepare(conn, statementName(.articles, read), read.statement(), io, deadline);
+        }
+    }
+}
+
+fn prepare(conn: *Conn, name: [:0]const u8, sql: [:0]const u8, io: std.Io, deadline: i64) !void {
+    if (PQsendPrepare(conn, name.ptr, sql.ptr, 0, null) != 1) return error.DatabasePrepare;
+    var successful = false;
+    var failed = false;
+    while (std.Io.Clock.awake.now(io).toMilliseconds() < deadline) {
+        const flush = PQflush(conn);
+        if (flush < 0 or PQconsumeInput(conn) != 1) return error.DatabasePrepare;
+        while (PQisBusy(conn) == 0) {
+            const result = PQgetResult(conn) orelse {
+                if (!successful or failed or PQtransactionStatus(conn) != 0) return error.DatabasePrepare;
+                return;
+            };
+            if (PQresultStatus(result) == 1) successful = true else failed = true;
+            PQclear(result);
+        }
+        var fds = [_]c.pollfd{.{ .fd = PQsocket(conn), .events = c.POLL.IN | @as(i16, if (flush == 1) c.POLL.OUT else 0), .revents = 0 }};
+        if (fds[0].fd < 0) return error.DatabasePrepare;
+        if (c.poll(&fds, 1, 100) < 0 and c.errno(@as(c_int, -1)) != .INTR) return error.DatabasePoll;
+    }
+    return error.DatabasePrepareTimeout;
+}
+
+pub fn query(conn: *Conn, route: http.Route, params: []const ?[:0]const u8, read: ?articles.Read) !void {
+    var actual = params;
+    if (read) |r| {
+        if (r.phase == .count) actual = switch (r.family) {
+            .all => &.{},
+            .feed => params[0..1],
+            .single => unreachable,
+            else => params[3..4],
+        };
+    }
+    if (prepared_queries) {
+        var values: [6]?[*:0]const u8 = @splat(null);
+        for (actual, 0..) |param, i| values[i] = if (param) |p| p.ptr else null;
+        if (PQsendQueryPrepared(conn, statementName(route, read).ptr, @intCast(actual.len), &values, null, null, 0) != 1) return error.DatabaseQuery;
+    } else try send(conn, querySql(route, read), actual);
 }
 
 pub fn send(conn: *Conn, statement: [:0]const u8, params: []const ?[:0]const u8) !void {

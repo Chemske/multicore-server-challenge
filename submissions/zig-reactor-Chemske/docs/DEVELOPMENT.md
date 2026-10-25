@@ -96,6 +96,8 @@ The count-failure check temporarily enables row-level security and a test-only p
 
 Milestone 5 adds no software or service installation. Its complete upstream/reference transcripts, the official runner log and write-failure evidence live in work/results/milestone5. The fault-injection triggers and temporary permission changes affect only disposable test clones and are removed. A short-lived unchanged Go reference also writes to the same private clone to exercise concurrent tag creation; no external database is used. Temporary servers and databases are removed even on test failure. The footprint remains about 1.7 GiB under work, including the 485 MiB dedicated database cluster.
 
+The first optimisation adds no dependencies or installed tools. Two saved executables, the pilot and the six-run comparison live under work/experiments/prepared-statements. Each run removes its private database and temporary server. All benchmark JSON, per-endpoint histograms and logs are disposable generated evidence; the comparison script itself is submitted source under benchmarks/. After validation, work remains about 1.7 GiB and the dedicated cluster is about 437 MiB. No test databases remain.
+
 ## Repository policy
 
 All proposed submission files stay under submissions/zig-reactor-Chemske. Shared challenge files remain unchanged. Documentation is in English and distinguishes intended behaviour from verified behaviour. Reused source keeps its licence and attribution; no invented benchmark or test result belongs in the README.

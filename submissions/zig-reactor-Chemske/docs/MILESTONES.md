@@ -112,6 +112,20 @@ Date: 2026-10-24. All API routes are implemented, including article writes, favo
 
 No new application, dependency or automatic service was installed. All disposable databases/servers were removed. The complete evidence is in work/results/milestone5, with selected deliverables in outputs. The test seed has 10k articles; full-seed, clean Linux installation/runtime, recovery improvements and capacity benchmarking remain outstanding. No leaderboard score is claimed.
 
+## Optimisation 1: named prepared queries
+
+Date: 2026-10-25. I rechecked the official rules and leaderboard at upstream `c3012257f2ee3dd2ccc72ada2eeba2b0d1278e8e`; they are unchanged. The leading official score remains 100,000 users. Prepared statements are explicitly permitted.
+
+Nineteen fixed users/profile/tags/article-read queries are prepared once per connection during startup. PostgreSQL retains its default plan-selection heuristic. The article/comment operation state machine keeps its original parameterized execution, and all commit/drain boundaries remain intact. `-Dprepared-queries=false` retains an unprepared control.
+
+- Three runs per build in A-B-B-A-B-A order, each on a fresh development-seed clone with the unchanged load generator: median 3,055.7 versus 4,523.6 requests/s (+48.0%). Median p95 is 35.615 versus 17.471 ms; median p99 is 48.287 versus 28.047 ms.
+- All 687,440 measured requests succeed. No run reports a generator limit. These are thirty-second local windows with accelerated think/session times on the six-core, 8 GiB Mac; the generator shares the machine. They do not establish full-seed or official capacity.
+- The prepared build passes twelve unit checks, all 197 unchanged upstream steps, exact normalized comparison with the Go reference, and all 11/13/15/15/15 focused scenario groups. The unprepared build also passes the complete write gate and 197-step comparison.
+- Linux x86_64 object-only semantic compilation passes with the build options module. No linked Linux runtime or clean installer is claimed.
+- The final default executable has the same SHA-256 as the measured candidate. Complete settings and limitations are in PERFORMANCE.md, with raw evidence under work/experiments/prepared-statements/comparison.
+
+No tools, applications or services were installed. All benchmark/test clones and temporary servers were removed. The workspace footprint remains about 1.7 GiB under work; the dedicated cluster is approximately 437 MiB.
+
 ## Next checkpoint
 
-Add recovery and complete protocol/runtime validation before optimisation. Batching and pipeline depth are later controlled experiments against this simple execution path.
+Add recovery and complete protocol/runtime validation before larger concurrency changes. Then compare bounded database concurrency, read batching and pipeline depth independently against the retained unbatched prepared control. The current 256-client limit and linear scans must be replaced before large direct-HTTP tests.

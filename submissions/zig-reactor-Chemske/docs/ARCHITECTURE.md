@@ -1,6 +1,6 @@
 # Proposed architecture
 
-Status: target design. The native single-owner execution path implements every API route and passes development-seed conformance. Multiple shards, batching, pipelines and reconnects remain planned. I keep the unbatched execution path as the correctness and measurement control.
+Status: target design. The native single-owner execution path implements every API route and passes development-seed conformance. Its original API path prepares nineteen fixed statements per connection; the later article/comment state machine retains parameterized single-query execution. Multiple shards, batching, pipelines and reconnects remain planned. I keep the unbatched execution path as the correctness and measurement control.
 
 ## Ownership and flow
 

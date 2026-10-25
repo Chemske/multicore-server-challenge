@@ -10,6 +10,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const options = b.addOptions();
+    options.addOption(bool, "prepared_queries", b.option(bool, "prepared-queries", "Prepare API queries per database connection") orelse true);
+    module.addOptions("build_options", options);
     module.addCSourceFile(.{ .file = b.path("vendor/picohttpparser/picohttpparser.c"), .flags = &.{"-std=c99"} });
     module.linkSystemLibrary("pq", .{ .use_pkg_config = .no });
     if (pg_root) |prefix| {

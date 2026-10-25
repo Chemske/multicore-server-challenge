@@ -529,7 +529,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..clients.len) |index| server.closeClient(index);
         if (server.active) |task| task.destroy(allocator);
     }
-    std.log.info("milestone 5: all API routes on {s}:{d}; one database connection, two bcrypt workers", .{ host, port });
+    std.log.info("all API routes on {s}:{d}; one database connection, two bcrypt workers, prepared API queries: {}", .{ host, port, pg.prepared_queries });
     try server.run();
 }
 
