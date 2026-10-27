@@ -5,7 +5,7 @@ Every submission on the same box: **8 dedicated vCPU / 16 GB**, Postgres 18 on t
 | # | Users | Submission | PR | Front | req/s | p95 ms | p99 ms | CPU: app / Postgres | Note |
 |--:|--:|---|---|---|--:|--:|--:|---|---|
 | 1 | **120,000** | [rust-epoll-WorriedArrow](submissions/rust-epoll-WorriedArrow) | [#47](https://github.com/arjaythedev/multicore-server-challenge/pull/47) @WorriedArrow | direct | 30,189 | 433 | 585 | 28% / 60% |  |
-| 2 | **110,000** | [go-epoll-MegaPanchamZ](https://github.com/arjaythedev/multicore-server-challenge/pull/61) | [#61](https://github.com/arjaythedev/multicore-server-challenge/pull/61) @MegaPanchamZ | direct | 28,339 | 346 | 471 | 27% / 67% |  |
+| 2 | **110,000** | [go-epoll-MegaPanchamZ](submissions/go-epoll-MegaPanchamZ) | [#61](https://github.com/arjaythedev/multicore-server-challenge/pull/61) @MegaPanchamZ | direct | 28,339 | 346 | 471 | 27% / 67% |  |
 | 3 | **110,000** | [zig-fourneau-y2kbugger](submissions/zig-fourneau-y2kbugger) | [#53](https://github.com/arjaythedev/multicore-server-challenge/pull/53) @y2kbugger | direct | 28,535 | 251 | 430 | 20% / 59% |  |
 | 4 | **110,000** | [zig-iouring-harshitkhandelwal208](submissions/zig-iouring-harshitkhandelwal208) | [#45](https://github.com/arjaythedev/multicore-server-challenge/pull/45) @harshitkhandelwal208 | direct | 28,835 | 162 | 477 | 22% / 63% |  |
 | 5 | **100,000** | [rust-tokio-Scooter1337](submissions/rust-tokio-Scooter1337) | [#7](https://github.com/arjaythedev/multicore-server-challenge/pull/7) @Scooter1337 | direct | 26,279 | 119 | 185 | 20% / 70% |  |
