@@ -18,7 +18,7 @@ Every submission on the same box: **8 dedicated vCPU / 16 GB**, Postgres 18 on t
 | 12 | **84,000** | [cobol-gnucobol-benmandrew](submissions/cobol-gnucobol-benmandrew) | [#15](https://github.com/arjaythedev/multicore-server-challenge/pull/15) @benmandrew | direct | 21,292 | 361 | 461 | 20% / 75% |  |
 | 13 | **84,000** | [kotlin-native-luben93](submissions/kotlin-native-luben93) | [#49](https://github.com/arjaythedev/multicore-server-challenge/pull/49) @luben93 | direct | 21,866 | 293 | 413 | 25% / 68% |  |
 | 14 | **84,000** | [rust-tokio-semyonfox](submissions/rust-tokio-semyonfox) | [#59](https://github.com/arjaythedev/multicore-server-challenge/pull/59) @semyonfox | direct | 21,598 | 425 | 511 | 21% / 64% |  |
-| 15 | **80,000** | [cpp-iouring-Escaloan](https://github.com/arjaythedev/multicore-server-challenge/pull/69) | [#69](https://github.com/arjaythedev/multicore-server-challenge/pull/69) @Escaloan | direct | 19,880 | 476 | 530 | 15% / 76% |  |
+| 15 | **80,000** | [cpp-iouring-Escaloan](submissions/cpp-iouring-Escaloan) | [#69](https://github.com/arjaythedev/multicore-server-challenge/pull/69) @Escaloan | direct | 19,880 | 476 | 530 | 15% / 76% |  |
 | 16 | **80,000** | [go-epoll-kaikegm](submissions/go-epoll-kaikegm) | [#57](https://github.com/arjaythedev/multicore-server-challenge/pull/57) @KaikeGM | direct | 20,951 | 201 | 358 | 22% / 71% |  |
 | 17 | **80,000** | [julia-raw-wardjm](submissions/julia-raw-wardjm) | [#43](https://github.com/arjaythedev/multicore-server-challenge/pull/43) @wardjm | direct | 20,519 | 339 | 406 | 22% / 68% |  |
 | 18 | **80,000** | [rust-mio-foovoo](submissions/rust-mio-foovoo) | [#11](https://github.com/arjaythedev/multicore-server-challenge/pull/11) @FooVoo | direct | 20,710 | 474 | 752 | 18% / 75% |  |
