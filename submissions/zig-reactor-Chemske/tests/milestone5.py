@@ -125,7 +125,9 @@ with Server(results, secret, 'writes', 'focus', submission / 'zig-out/bin/condui
     slug = article['slug']
     identifier = int(slug.rsplit('-', 1)[1])
     assert slug == 'm5-lan-ping-' + str(identifier)
-    assert article['tagList'] == sorted(special)
+    # The reference orders in PostgreSQL's collation, not Python's code-point order.
+    expected_tags = json.loads(zig.sql('SELECT json_agg(name ORDER BY name) FROM unnest(ARRAY[' + ','.join(literal(tag) for tag in special) + ']) AS names(name)'))
+    assert article['tagList'] == expected_tags
     assert article['body'] == payload('x')['article']['body']
     assert zig.sql(f'SELECT count(*) FROM article_tags WHERE article_id={identifier}') == str(len(special))
     idle()
