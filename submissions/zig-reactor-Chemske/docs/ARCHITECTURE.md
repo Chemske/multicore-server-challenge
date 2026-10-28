@@ -12,7 +12,7 @@ The checked build-time database range is 1–95 in total. The optional dedicated
 
 ## Connection scheduling and resource bounds
 
-The configured HTTP ceiling is 131,072. Startup reads the process descriptor limits, reserves database/control descriptors and raises only its own soft limit when the existing hard limit permits it. On macOS it also reads the existing kernel ceiling without changing it. The effective limit on my Mac is 10,204 with four database owners. This is not evidence of 100,000 real connections on Linux.
+The configured HTTP ceiling is 196,608. Startup reads the process descriptor limits, reserves database/control descriptors and raises only its own soft limit when the existing hard limit permits it. On macOS it also reads the existing kernel ceiling without changing it. The effective limit on my Mac is 10,204 with four database owners. A separate Linux test has retained 150,000 sockets and checked an HTTP response on each; this does not establish workload capacity.
 
 A linked free list allocates/releases slots in constant time. Independent intrusive read/write FIFOs add and remove queued requests in constant time. An indexed min-heap holds one deadline per live socket, with logarithmic updates/cancellation. The loop no longer scans all clients on every turn. Deadline expiry closes at most 512 sockets per turn; accepts are limited to 64 per turn. Descriptor exhaustion pauses listener admission for 250 ms while existing work progresses.
 
@@ -52,8 +52,10 @@ HS256 signature, algorithm, subject and expiry are checked on every applicable r
 
 The bcrypt adapter normalizes only a corrected Go `$2a$10$` marker to Zig's `$2b$10$` rendering before the full bcrypt calculation. Registration rejects passwords above 72 bytes, while verification follows Go's truncation behaviour. Password buffers are cleared after work.
 
+An optional worker backend interleaves two to four independent hashes to overlap dependent Blowfish lookups on one CPU. Each lane retains its own password, salt, full cost-ten rounds and result. Singletons use the standard-library path. `bcrypt-lanes` selects the maximum width; `bcrypt-gather-ms` optionally gives one collector per pool a bounded collection window. Other workers release the mutex while waiting. Collection stops at the fixed deadline, full width or shutdown. Results stay attached to their original job, including malformed stored hashes and disconnected clients. Defaults retain width one without a collection delay until distributed measurements select the production setting.
+
 ## Recovery and portability
 
 Each failed owner reconnects independently with 250 ms–5 s exponential backoff. Healthy owners continue. Unsent work fails promptly if no usable owner for its read/write class remains. The numeric loopback benchmark address avoids potentially blocking DNS inside libpq. See RECOVERY.md for the fault matrix and uncertain-commit proof.
 
-Linux validation checks the source installer, linked executable, actual progress on every reactor, partial writes, pipelining, SQL errors, reconnects and conformance. The optional Linux socket test checks 100,000 live connections separately from workload capacity; the organiser's benchmark remains required for a score. The source-built libpq and compiler installer target Ubuntu only and are never run on my Mac.
+Linux validation checks the source installer, linked executable, actual progress on every reactor, partial writes, pipelining, SQL errors, reconnects and conformance. The optional Linux socket test checks 150,000 live connections separately from workload capacity; the organiser's benchmark remains required for a score. The source-built libpq and compiler installer target Ubuntu only and are never run on my Mac.

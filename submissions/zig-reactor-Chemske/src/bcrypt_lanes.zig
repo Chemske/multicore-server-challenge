@@ -3,6 +3,80 @@
 const std = @import("std");
 const bcrypt = std.crypto.pwhash.bcrypt;
 const State = bcrypt.State;
+const alphabet = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".*;
+const encoder: std.base64.Base64Encoder = .init(alphabet, null);
+const decoder: std.base64.Base64Decoder = .init(alphabet, null);
+
+pub fn verifyScalar(hash: *const [60:0]u8, password: []const u8) bool {
+    if (!std.mem.startsWith(u8, hash, "$2a$10$") and !std.mem.startsWith(u8, hash, "$2b$10$")) return false;
+    var normalized = hash.*;
+    normalized[2] = 'b';
+    bcrypt.strVerify(normalized[0..60], password, .{ .silently_truncate_password = false }) catch return false;
+    return true;
+}
+
+fn render(salt: [16]u8, digest: [23]u8) [60]u8 {
+    var encoded: [60]u8 = undefined;
+    @memcpy(encoded[0..7], "$2b$10$");
+    _ = encoder.encode(encoded[7..29], &salt);
+    _ = encoder.encode(encoded[29..60], &digest);
+    return encoded;
+}
+
+fn processWidth(comptime Job: type, comptime width: usize, jobs: [width]*Job, salts: [width][16]u8) void {
+    var passwords: [width][]const u8 = undefined;
+    inline for (0..width) |lane| passwords[lane] = jobs[lane].password[0..jobs[lane].password_len];
+    var digests = derive(width, passwords, salts, 10);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&digests));
+    inline for (0..width) |lane| {
+        const encoded = render(salts[lane], digests[lane]);
+        const job = jobs[lane];
+        if (job.mode == .hash) {
+            @memcpy(job.hash[0..60], &encoded);
+            job.hash[60] = 0;
+            job.ok = true;
+        } else {
+            var stored = job.hash[0..60].*;
+            stored[2] = 'b';
+            job.ok = std.crypto.timing_safe.eql([60]u8, stored, encoded);
+        }
+    }
+}
+
+// Invalid stored encodings fail individually, without shifting another job's
+// result. A singleton retains the original standard-library execution path.
+pub fn process(comptime Job: type, jobs: []*Job) usize {
+    std.debug.assert(jobs.len > 0 and jobs.len <= 4);
+    var valid: [4]*Job = undefined;
+    var salts: [4][16]u8 = undefined;
+    var count: usize = 0;
+    for (jobs) |job| {
+        job.ok = false;
+        std.debug.assert(job.password_len <= 72);
+        if (job.mode == .hash) {
+            salts[count] = job.salt;
+        } else {
+            if (!std.mem.startsWith(u8, &job.hash, "$2a$10$") and !std.mem.startsWith(u8, &job.hash, "$2b$10$")) continue;
+            decoder.decode(&salts[count], job.hash[7..29]) catch continue;
+        }
+        valid[count] = job;
+        count += 1;
+    }
+    switch (count) {
+        0 => {},
+        1 => {
+            const job = valid[0];
+            const password = job.password[0..job.password_len];
+            job.ok = switch (job.mode) {
+                .verify => verifyScalar(&job.hash, password),
+                .hash => if (bcrypt.strHashWithSalt(password, .{ .params = .{ .rounds_log = 10, .silently_truncate_password = false }, .encoding = .crypt }, job.hash[0..60], job.salt)) |_| true else |_| false,
+            };
+        },
+        inline 2...4 => |width| processWidth(Job, width, valid[0..width].*, salts[0..width].*),
+        else => unreachable,
+    }
+    return count;
+}
 
 fn word(bytes: []const u8, position: *usize) u32 {
     var value: u32 = 0;
@@ -155,4 +229,45 @@ test "four distinct lanes retain every cost-ten round" {
         const expected = bcrypt.bcrypt(password, &salt, .{ .rounds_log = 10, .silently_truncate_password = true });
         try std.testing.expectEqualSlices(u8, &expected, &digest);
     }
+}
+
+test "mixed password jobs retain salts, markers and recipient ownership" {
+    const Job = struct {
+        mode: enum { hash, verify } = .hash,
+        password: [72]u8 = @splat(0),
+        password_len: usize = 0,
+        hash: [60:0]u8 = @splat(0),
+        salt: [16]u8 = undefined,
+        ok: bool = false,
+    };
+    const passwords = [_][]const u8{ "password123", "another password", "correct é", "unused" };
+    var storage: [4]Job = @splat(.{});
+    var jobs: [4]*Job = undefined;
+    for (&storage, 0..) |*job, index| {
+        job.password_len = passwords[index].len;
+        @memcpy(job.password[0..job.password_len], passwords[index]);
+        for (&job.salt, 0..) |*byte, position| byte.* = @truncate(index * 43 + position * 17);
+        jobs[index] = job;
+    }
+    try std.testing.expectEqual(@as(usize, 3), process(Job, jobs[0..3]));
+    for (storage[0..3], passwords[0..3]) |job, password| {
+        try std.testing.expect(job.ok);
+        try std.testing.expect(verifyScalar(&job.hash, password));
+    }
+    storage[0].mode = .verify;
+    storage[0].hash[2] = 'a';
+    storage[2].mode = .verify;
+    storage[2].password[0] ^= 1;
+    storage[3].mode = .verify;
+    storage[3].hash = storage[0].hash;
+    storage[3].hash[2] = 'x';
+    try std.testing.expectEqual(@as(usize, 3), process(Job, &jobs));
+    try std.testing.expect(storage[0].ok and storage[1].ok and !storage[2].ok and !storage[3].ok);
+    // All-invalid and partially valid groups cannot inherit an earlier success.
+    storage[0].hash[2] = 'x';
+    storage[2].hash[2] = 'x';
+    storage[1].mode = .verify;
+    storage[1].hash[2] = 'x';
+    try std.testing.expectEqual(@as(usize, 0), process(Job, &jobs));
+    for (storage) |job| try std.testing.expect(!job.ok);
 }

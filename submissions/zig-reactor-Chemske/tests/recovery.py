@@ -308,6 +308,7 @@ def main():
 
     with Proxy() as proxy, Server(results, secret, 'recovery', 'contract', submission / 'zig-out/bin/conduit', database_port=proxy.port) as server:
         # One healthy listener does not prove that every reactor's pool recovered.
+        count_query = f"SELECT count(*) FROM pg_stat_activity WHERE datname='{server.database}' AND usename='conduit' AND state='idle' AND xact_start IS NULL"
         rebuilt(connection_count)
         accepted = len(proxy.sessions)
         kill()
