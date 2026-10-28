@@ -1,62 +1,89 @@
-# Runs every submission (and example) a pull request adds or changes through test/run.sh on a clean Ubuntu 24.04,
-# against Postgres 18 and the 2% dev seed.
-name: test submissions
+name: Zig Linux comparison
 on:
-  pull_request:
-  push:
-    branches: [main]
-  workflow_dispatch:   # re-tests every submission and example
+  workflow_dispatch:
 permissions:
   contents: read
-
 jobs:
-  find:
+  compare:
     runs-on: ubuntu-24.04
-    outputs:
-      dirs: ${{ steps.dirs.outputs.dirs }}
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      - id: dirs
-        run: |
-          all() { ls -d submissions/*/ examples/*/ 2>/dev/null | sed 's#/$#/x#'; }
-          if [ "${{ github.event_name }}" = pull_request ]; then
-            changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
-          elif [ "${{ github.event_name }}" = push ] && git rev-parse -q --verify HEAD~1 >/dev/null; then
-            changed=$(git diff --name-only HEAD~1 HEAD)
-          else
-            changed=$(all)
-          fi
-          # a change to shared files (spec, bench, seed, tests, CI) re-tests everything; docs-only changes test nothing extra
-          if echo "$changed" | grep -v '^submissions/\|^examples/' | grep -qv '\.md$\|^LICENSE$\|^box/'; then changed=$(all); fi
-          dirs=$(echo "$changed" | awk -F/ '($1=="submissions" || $1=="examples") && NF>2 {print $1"/"$2}' | sort -u | while read -r d; do [ -d "$d" ] && echo "$d"; done)
-          echo "dirs=$(echo "$dirs" | jq -R . | jq -sc 'map(select(length>0))')" >> "$GITHUB_OUTPUT"
-          echo "testing: $dirs"
-
-  test:
-    needs: find
-    if: needs.find.outputs.dirs != '[]'
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        dir: ${{ fromJson(needs.find.outputs.dirs) }}
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:18
         env: { POSTGRES_PASSWORD: postgres }
         ports: ["5432:5432"]
-        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
-    env: { PGHOST: 127.0.0.1, PGPORT: 5432, PGUSER: postgres, PGPASSWORD: postgres }
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30 --shm-size=5g
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGROOT: /opt/conduit-zig-tools/postgresql-18.6
+      CHALLENGE_WORK: ${{ runner.temp }}/zig-reactor-v2
+      PYTHONDONTWRITEBYTECODE: 1
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: actions/setup-go@v5
         with: { go-version-file: bench/go.mod, cache-dependency-path: bench/go.sum }
-      - name: tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client curl jq
-      - name: seed
-        run: bash seed/make-seed.sh --dev
-      - name: install.sh
-        run: sudo bash ${{ matrix.dir }}/install.sh
-      - name: build, start, test
-        run: bash test/run.sh ${{ matrix.dir }}
+      - name: Tools and host identity
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client curl jq sysstat
+          mkdir -p "$CHALLENGE_WORK/tools" "$CHALLENGE_WORK/results"
+          { uname -a; nproc; lscpu; free -m; df -h .; } > "$CHALLENGE_WORK/results/host.txt"
+          echo '/opt/conduit-zig-tools/zig-0.17.0' >> "$GITHUB_PATH"
+          sudo bash submissions/zig-reactor-Chemske/install.sh
+      - name: Fixed benchmark PostgreSQL settings on disposable CI service
+        env:
+          DB_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          # The eight-CPU/16-GiB box's published settings. Never used by install/start.
+          docker exec -i "$DB_CONTAINER" sh -c 'cat >> "$PGDATA/postgresql.conf"' <<'CONF'
+          max_connections = 100
+          shared_buffers = 4GB
+          effective_cache_size = 12GB
+          maintenance_work_mem = 1GB
+          checkpoint_completion_target = 0.9
+          wal_buffers = 16MB
+          default_statistics_target = 100
+          random_page_cost = 1.1
+          effective_io_concurrency = 200
+          work_mem = 9709kB
+          huge_pages = try
+          min_wal_size = 1GB
+          max_wal_size = 4GB
+          max_worker_processes = 8
+          max_parallel_workers = 8
+          max_parallel_workers_per_gather = 4
+          max_parallel_maintenance_workers = 4
+          CONF
+          docker restart "$DB_CONTAINER"
+          for attempt in $(seq 60); do pg_isready -h 127.0.0.1 -p 5432 && break; sleep 1; done
+      - name: Full unchanged seed and load generator
+        run: |
+          bash seed/make-seed.sh
+          (cd bench && go build -o "$CHALLENGE_WORK/tools/loadgen" ./cmd/loadgen && go build -o "$CHALLENGE_WORK/tools/conformance" ./cmd/conformance)
+      - name: Build baseline and candidates
+        run: |
+          set -e
+          baseline="$RUNNER_TEMP/baseline"
+          mkdir -p "$baseline"
+          git archive a026224 submissions/zig-reactor-Chemske | tar -x -C "$baseline"
+          (cd "$baseline/submissions/zig-reactor-Chemske" && zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" --prefix "$CHALLENGE_WORK/build-A")
+          cd submissions/zig-reactor-Chemske
+          zig build test -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=8 --summary all
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=1 -Ddb-connections=8 --prefix "$CHALLENGE_WORK/build-B"
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=8 --prefix "$CHALLENGE_WORK/build-C"
+      - name: Repeated Linux comparison and unchanged conformance
+        run: |
+          ulimit -n 200000
+          cd submissions/zig-reactor-Chemske
+          python3 benchmarks/linux_compare.py --variant "A=$CHALLENGE_WORK/build-A/bin/conduit" --variant "B=$CHALLENGE_WORK/build-B/bin/conduit" --variant "C=$CHALLENGE_WORK/build-C/bin/conduit" --order ABCCBA --users 20000 --ramp 15s --measure 30s --tail 3s --conformance --out "$CHALLENGE_WORK/results/comparison"
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zig-linux-comparison
+          path: ${{ env.CHALLENGE_WORK }}/results
+          retention-days: 14
