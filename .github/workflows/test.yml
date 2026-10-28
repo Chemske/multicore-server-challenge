@@ -63,6 +63,7 @@ jobs:
       - name: Full unchanged seed and load generator
         run: |
           bash seed/make-seed.sh
+          bash seed/make-seed.sh --dev
           (cd bench && go build -o "$CHALLENGE_WORK/tools/loadgen" ./cmd/loadgen && go build -o "$CHALLENGE_WORK/tools/conformance" ./cmd/conformance)
       - name: Build baseline and candidates
         run: |
@@ -72,16 +73,29 @@ jobs:
           git archive a026224 submissions/zig-reactor-Chemske | tar -x -C "$baseline"
           (cd "$baseline/submissions/zig-reactor-Chemske" && zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" --prefix "$CHALLENGE_WORK/build-A")
           cd submissions/zig-reactor-Chemske
-          zig build test -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=8 --summary all
+          zig build test -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=16 -Dwrite-connections=4 -Dread-batch-size=128 --summary all
           zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=1 -Ddb-connections=4 --prefix "$CHALLENGE_WORK/build-B"
-          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=8 -Dmax-tasks=8192 --prefix "$CHALLENGE_WORK/build-C"
-          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=4 -Ddb-connections=16 -Dmax-tasks=8192 --prefix "$CHALLENGE_WORK/build-D"
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=16 -Dwrite-connections=4 -Dread-batch-size=32 -Dmax-tasks=8192 --prefix "$CHALLENGE_WORK/build-C"
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=16 -Dwrite-connections=4 -Dread-batch-size=128 -Dmax-tasks=8192 --prefix "$CHALLENGE_WORK/build-D"
       - name: Repeated Linux comparison and unchanged conformance
         run: |
           sudo prlimit --pid $$ --nofile=200000:200000
           ulimit -n 200000
           cd submissions/zig-reactor-Chemske
           python3 benchmarks/linux_compare.py --variant "A=$CHALLENGE_WORK/build-A/bin/conduit" --variant "B=$CHALLENGE_WORK/build-B/bin/conduit" --variant "C=$CHALLENGE_WORK/build-C/bin/conduit" --variant "D=$CHALLENGE_WORK/build-D/bin/conduit" --order ABCDDCBA --users 20000 --ramp 15s --measure 30s --tail 3s --conformance --out "$CHALLENGE_WORK/results/comparison"
+      - name: Higher offered load and Linux reactor checks
+        run: |
+          sudo prlimit --pid $$ --nofile=200000:200000
+          ulimit -n 200000
+          cd submissions/zig-reactor-Chemske
+          python3 benchmarks/linux_compare.py --variant "C=$CHALLENGE_WORK/build-C/bin/conduit" --variant "D=$CHALLENGE_WORK/build-D/bin/conduit" --order CDDC --users 40000 --ramp 15s --measure 30s --tail 3s --out "$CHALLENGE_WORK/results/higher-load"
+          cp "$CHALLENGE_WORK/build-D/bin/conduit" zig-out/bin/conduit
+          python3 tests/reactor.py --reactors 2
+          python3 tests/milestone5.py
+          python3 tests/recovery.py
+          cp "$CHALLENGE_WORK/build-B/bin/conduit" zig-out/bin/conduit
+          python3 tests/page_batch.py
+          python3 tests/comment_batch.py
       - name: Evidence
         if: always()
         uses: actions/upload-artifact@v4
