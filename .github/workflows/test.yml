@@ -99,7 +99,10 @@ jobs:
           ulimit -n 200000
           cd submissions/zig-reactor-Chemske
           python3 benchmarks/linux_compare.py --variant "C=$CHALLENGE_WORK/build-C/bin/conduit" --variant "D=$CHALLENGE_WORK/build-D/bin/conduit" --order CDDC --users 40000 --ramp 15s --measure 30s --tail 3s --out "$CHALLENGE_WORK/results/higher-load"
+          mkdir -p zig-out/bin
           cp "$CHALLENGE_WORK/build-D/bin/conduit" zig-out/bin/conduit
+          python3 tests/write_pool.py --writers 4
+          python3 tests/linux_connections.py
           python3 tests/reactor.py --reactors 2
           python3 tests/milestone5.py
           python3 tests/recovery.py
