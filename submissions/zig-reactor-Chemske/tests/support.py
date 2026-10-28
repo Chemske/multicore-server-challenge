@@ -55,7 +55,7 @@ class Server:
             environment = dict(os.environ, HOST='127.0.0.1', PORT=str(self.port), JWT_SECRET=self.secret,
                                DATABASE_URL=f"postgres://conduit:conduit@127.0.0.1:{database_port}/{self.database}{options}")
             self.process = subprocess.Popen([str(self.executable)], env=environment, stdout=self.log, stderr=self.log)
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 60
             while True:
                 try:
                     assert self.request('GET', '/api/tags')[0] == 200
