@@ -42,7 +42,10 @@ with Server(results, 'linux-sockets-test-only', 'linuxsockets', 'scale', submiss
                     pending.add(peer)
                     peer.setblocking(False)
                     # Separate loopback sources avoid the per-destination port range.
-                    peer.bind((f'127.0.0.{2 + created % 4}', 0))
+                    # Explicit unique ports avoid quadratic bind(0) searches
+                    # as each source address fills its ephemeral range.
+                    peer.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    peer.bind((f'127.0.0.{2 + created % 4}', 20000 + created // 4))
                     result = peer.connect_ex(('127.0.0.1', server.port))
                     assert result in (0, errno.EINPROGRESS), result
                     selector.register(peer, selectors.EVENT_WRITE)
@@ -53,6 +56,8 @@ with Server(results, 'linux-sockets-test-only', 'linuxsockets', 'scale', submiss
                     selector.unregister(peer)
                     pending.remove(peer)
                     peers.append(peer)
+                    if len(peers) % 10000 == 0:
+                        print(f'Connected {len(peers)} sockets in {time.monotonic() - started:.2f}s', flush=True)
                 assert time.monotonic() - started < 45, 'connection setup exceeded 45 seconds'
         opened_seconds = time.monotonic() - started
         # Validate every retained socket, in bounded windows, with an immediate
@@ -85,6 +90,11 @@ with Server(results, 'linux-sockets-test-only', 'linuxsockets', 'scale', submiss
             'open_seconds': opened_seconds, 'rss_mib': rss, 'idle_cpu_pct_one_core': idle_cpu,
             'scope': 'Live socket ownership and reuse only; not 100000 workload users or an official capacity score.'}, indent=2) + '\n')
         print(f'PASS: {len(peers)} live Linux sockets, every socket answered HTTP; RSS {rss:.1f} MiB; idle CPU {idle_cpu:.2f}% of one core', flush=True)
+    except BaseException:
+        (results / 'failure.json').write_text(json.dumps({'connected': len(peers), 'pending': len(pending),
+            'elapsed_seconds': time.monotonic() - started,
+            'server_descriptors': len(list(Path(f'/proc/{server.process.pid}/fd').iterdir()))}, indent=2) + '\n')
+        raise
     finally:
         for peer in pending | set(peers):
             peer.close()
