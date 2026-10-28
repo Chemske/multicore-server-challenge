@@ -1024,6 +1024,7 @@ test {
     _ = http;
     _ = @import("auth.zig");
     _ = bcrypt;
+    _ = @import("bcrypt_lanes.zig");
     _ = @import("profiles.zig");
     _ = @import("url.zig");
     _ = @import("articles.zig");
