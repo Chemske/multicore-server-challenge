@@ -10,6 +10,7 @@ import re
 import statistics
 import subprocess
 import sys
+from collections import Counter
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
@@ -29,6 +30,13 @@ def threads(pid):
         except (OSError, ValueError):
             pass
     return result
+
+
+def database_activity(database):
+    # Snapshot wait classes only; never collect application SQL or parameters.
+    query = "SELECT COALESCE(wait_event_type, 'CPU/runnable'),COALESCE(wait_event, 'none'),state,count(*) FROM pg_stat_activity WHERE datname='" + database + "' AND usename='conduit' GROUP BY 1,2,3"
+    result = subprocess.run(['psql', '-XAt', '-F', '|', '-d', 'postgres', '-c', query], capture_output=True, text=True, timeout=3, check=True)
+    return [line.split('|') for line in result.stdout.splitlines()]
 
 
 def main():
@@ -82,7 +90,7 @@ def main():
                     try:
                         deadline = time.monotonic() + 1200
                         while process.poll() is None:
-                            samples.append({'unix_s': time.time(), 'ticks': threads(server.process.pid)})
+                            samples.append({'unix_s': time.time(), 'ticks': threads(server.process.pid), 'database': database_activity(server.database)})
                             if time.monotonic() > deadline:
                                 raise TimeoutError('load run exceeded 1200 seconds')
                             time.sleep(1)
@@ -110,12 +118,16 @@ def main():
                     for tid, last in selected[-1]['ticks'].items():
                         first = selected[0]['ticks'].get(tid, last)
                         cpu[tid] = 100 * (last - first) / os.sysconf('SC_CLK_TCK') / duration
+                waits = Counter()
+                for sample in selected:
+                    for kind, event, state, count in sample['database']:
+                        waits[kind + '/' + event + '/' + state] += int(count)
                 stats = []
                 for line in (out / f'{server.database}.log').read_text().splitlines():
                     if 'reactor_stats ' in line:
                         stats.append({key: int(value) for key, value in re.findall(r'(\w+)=([0-9]+)', line)})
                 result = {'run': name, 'build': label, 'overall': data['overall'], 'verdict': data['verdict'],
-                          'mix': data['mix'], 'per_thread_cpu_pct_of_one_core': cpu, 'reactor_stats': stats}
+                          'mix': data['mix'], 'per_thread_cpu_pct_of_one_core': cpu, 'database_wait_samples': dict(waits), 'reactor_stats': stats}
                 report['runs'].append(result)
                 overall = data['overall']
                 print(f"{name}: {overall['rps']:.1f} req/s; p95 {overall['p95_ms']:.2f} ms; p99 {overall['p99_ms']:.2f} ms; errors {overall['errors']}/{overall['count']}; LG-limited={data['verdict']['lg_limited']}", flush=True)
