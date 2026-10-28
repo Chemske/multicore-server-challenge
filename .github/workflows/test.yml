@@ -64,6 +64,7 @@ jobs:
         run: |
           bash seed/make-seed.sh
           bash seed/make-seed.sh --dev
+          (cd examples/go && go build -trimpath -o "$CHALLENGE_WORK/tools/reference-go" .)
           (cd bench && go build -o "$CHALLENGE_WORK/tools/loadgen" ./cmd/loadgen && go build -o "$CHALLENGE_WORK/tools/conformance" ./cmd/conformance)
       - name: Build baseline and candidates
         run: |
