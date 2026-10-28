@@ -189,11 +189,12 @@ def lock_tags(server, mode='SHARE', table='tags'):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--restart-cluster', action='store_true')
+    parser.add_argument('--connections', type=int, help='Expected total pool size for multi-reactor tests')
     args = parser.parse_args()
     checks = []
     with Proxy() as proxy, Server(results, secret, 'recovery', 'focus', submission / 'zig-out/bin/conduit', database_port=proxy.port) as server:
         count_query = f"SELECT count(*) FROM pg_stat_activity WHERE datname='{server.database}' AND usename='conduit' AND state='idle' AND xact_start IS NULL"
-        connection_count = int(sql(count_query))
+        connection_count = args.connections or int(sql(count_query))
         assert 1 <= connection_count <= 95
 
         def ready():
@@ -305,14 +306,17 @@ def main():
             assert server.sql("SELECT count(*) FROM articles WHERE title='recovery committed without acknowledgement'") == '1'
             checks.append('the dedicated development cluster restarts while the application stays alive and reconnects')
 
-    with Server(results, secret, 'recovery', 'contract', submission / 'zig-out/bin/conduit') as server:
-        server.sql(f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='{server.database}' AND usename='conduit'")
-        eventually(lambda: server.request('GET', '/api/tags')[0] == 200)
+    with Proxy() as proxy, Server(results, secret, 'recovery', 'contract', submission / 'zig-out/bin/conduit', database_port=proxy.port) as server:
+        # One healthy listener does not prove that every reactor's pool recovered.
+        rebuilt(connection_count)
+        accepted = len(proxy.sessions)
+        kill()
+        rebuilt(accepted + connection_count)
         run, transcript, _, summary = upstream(server, 'after-recovery', work / 'tools/conformance')
         assert run.returncode == 0 and len(transcript) == 197, summary
         checks.append('all 197 unchanged conformance steps pass after backend replacement')
     evidence = {'checks': checks, 'database_connections': connection_count, 'upstream_steps_passed': 197,
-                'scope': 'native Mac development seed; no full-seed, Linux-runtime or capacity claim'}
+                'scope': 'development-seed fault injection; platform recorded by the enclosing run; no capacity claim'}
     (results / 'results.json').write_text(json.dumps(evidence, indent=2) + '\n')
     print(f'PASS: {len(checks)} recovery/concurrency scenarios; {connection_count} owners; 197 upstream steps', flush=True)
 
