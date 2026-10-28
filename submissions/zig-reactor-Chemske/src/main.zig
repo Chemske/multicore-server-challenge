@@ -8,6 +8,7 @@ const bcrypt = @import("bcrypt_pool.zig");
 
 const scheduling = @import("scheduler.zig");
 const read_batch = @import("read_batch.zig");
+const page_batch = @import("page_batch.zig");
 const max_clients = @import("build_options").max_clients;
 const reactor_count = @import("build_options").reactors;
 const max_tasks = @import("build_options").max_tasks / reactor_count;
@@ -16,20 +17,22 @@ const max_output_bytes = 64 * 1024 * 1024 / reactor_count;
 const max_input = http.max_head + http.max_body + 4096;
 const database_bit: u64 = 1 << 31;
 const database_connections = @import("build_options").database_connections;
+const write_connections = @import("build_options").write_connections;
 const listener_token = 1;
 const worker_token = 2;
 const Database = struct {
     connection: ?*pg.Conn = null,
     opening: ?pg.Connector = null,
     active: ?*requests.Task = null,
+    writer: bool = false,
     active_since: i64 = 0,
     retry_at: i64 = 0,
     retry_delay: i64 = 250,
     generation: u32 = 1,
     fd: c_int = -1,
-    followers: [31]?*requests.Task = @splat(null),
+    followers: [read_batch.capacity - 1]?*requests.Task = @splat(null),
     follower_count: usize = 0,
-    read_group: enum { none, article, comments } = .none,
+    read_group: enum { none, article, comments, pages } = .none,
 };
 const State = enum { closed, reading, queued, database, hashing, writing };
 const Client = struct {
@@ -238,7 +241,7 @@ const Server = struct {
         const client = &self.clients[index];
         client.state = .queued;
         task.queued_at = self.now();
-        self.scheduler.enqueue(index);
+        if (write_connections > 0 and isWrite(task.route)) self.scheduler.enqueueWrite(index) else self.scheduler.enqueue(index);
         self.loop.watch(client.fd, self.token(index), false, false) catch self.closeClient(index);
     }
 
@@ -412,15 +415,62 @@ const Server = struct {
         }
     }
 
+    fn pageInput(task: *requests.Task) page_batch.Input {
+        return .{
+            .viewer = task.params[0].?,
+            .limit = task.params[1].?,
+            .offset = task.params[2].?,
+            .key = if (task.read.?.family == .feed) task.params[0].? else task.params[3] orelse "",
+        };
+    }
+
+    fn sendPageGroup(database: *Database) !void {
+        const primary = database.active.?;
+        var inputs: [read_batch.capacity]page_batch.Input = undefined;
+        inputs[0] = pageInput(primary);
+        for (database.followers[0..database.follower_count], 1..) |task, index| inputs[index] = pageInput(task.?);
+        try pg.sendPageBatch(database.connection.?, inputs[0 .. database.follower_count + 1], primary.arena.allocator(), primary.read.?.family, primary.read.?.phase == .count);
+    }
+
     fn readGroupResult(self: *Server, database: *Database, result: *pg.Result) void {
         _ = self;
         var members: [read_batch.capacity]*requests.Task = undefined;
         members[0] = database.active.?;
         for (database.followers[0..database.follower_count], 1..) |task, index| members[index] = task.?;
         const group = members[0 .. database.follower_count + 1];
+        if (database.read_group == .pages) {
+            const count = group[0].read.?.phase == .count;
+            var bounds: [read_batch.capacity + 1]usize = undefined;
+            pg.readBatchBounds(result, group.len, if (count) 2 else 13, &bounds) catch {
+                for (group) |task| task.status = 503;
+                return;
+            };
+            if (count) for (0..group.len) |index| {
+                if (bounds[index + 1] != bounds[index] + 1) {
+                    for (group) |task| task.status = 503;
+                    return;
+                }
+            };
+            for (group, 0..) |task, index| {
+                if (count) {
+                    if (task.status != 200) continue;
+                    task.read.?.count = pg.pageBatchCount(result, bounds[index]) catch {
+                        task.status = 503;
+                        continue;
+                    };
+                } else {
+                    task.read.?.rows = pg.pageBatchRows(result, bounds[index], bounds[index + 1], task.arena.allocator()) catch {
+                        task.status = 503;
+                        continue;
+                    };
+                    task.status = 200;
+                }
+            }
+            return;
+        }
         if (database.read_group == .comments) {
             var bounds: [read_batch.capacity + 1]usize = undefined;
-            pg.commentsBatchBounds(result, group.len, &bounds) catch {
+            pg.readBatchBounds(result, group.len, 10, &bounds) catch {
                 for (group) |task| task.status = 503;
                 return;
             };
@@ -506,6 +556,23 @@ const Server = struct {
             const result = pg.PQgetResult(connection) orelse {
                 // The statement is fully drained, including its transaction completion.
                 if (database.read_group != .none) {
+                    if (database.read_group == .pages and task.read.?.phase == .page) {
+                        var needs_count = task.status == 200 and self.isLive(task);
+                        task.read.?.phase = .count;
+                        for (database.followers[0..database.follower_count]) |other| {
+                            needs_count = needs_count or (other.?.status == 200 and self.isLive(other.?));
+                            other.?.read.?.phase = .count;
+                        }
+                        if (needs_count) {
+                            database.active_since = self.now();
+                            sendPageGroup(database) catch {
+                                self.databaseFailed(index);
+                                return;
+                            };
+                            try self.databaseReady(index, false);
+                            return;
+                        }
+                    }
                     const count = database.follower_count;
                     database.follower_count = 0;
                     database.read_group = .none;
@@ -628,19 +695,35 @@ const Server = struct {
 
     fn dispatch(self: *Server) !void {
         for (0..64) |_| {
-            if (self.scheduler.head == scheduling.none) return;
-            const index: usize = self.scheduler.head;
-            const task = self.clients[index].task.?;
-            const slot = for (self.databases, 0..) |database, i| {
-                if (database.connection != null and database.active == null) break i;
-            } else {
-                // Wait only for ready, occupied owners. An entirely unavailable
-                // database fails unsent work promptly instead of hiding a backlog.
-                for (self.databases) |database| if (database.connection != null) return;
-                self.scheduler.unqueue(index);
-                self.finish(task, 503, "{\"errors\":{\"body\":[\"database unavailable\"]}}");
-                continue;
+            var selected: ?struct { index: usize, slot: usize, since: i64 } = null;
+            var failed = false;
+            for (0..if (write_connections > 0) @as(usize, 2) else @as(usize, 1)) |lane| {
+                const head = if (lane == 1) self.scheduler.write_head else self.scheduler.head;
+                if (head == scheduling.none) continue;
+                var available = false;
+                for (self.databases, 0..) |database, slot| {
+                    if (write_connections > 0 and database.writer != (lane == 1)) continue;
+                    if (database.connection == null) continue;
+                    available = true;
+                    if (database.active != null) continue;
+                    const waiting = self.clients[head].task.?;
+                    if (selected == null or waiting.queued_at < selected.?.since)
+                        selected = .{ .index = head, .slot = slot, .since = waiting.queued_at };
+                    break;
+                }
+                if (!available) {
+                    self.scheduler.unqueue(head);
+                    self.finish(self.clients[head].task.?, 503, "{\"errors\":{\"body\":[\"database unavailable\"]}}");
+                    failed = true;
+                }
+            }
+            const chosen = selected orelse {
+                if (failed) continue;
+                return;
             };
+            const index = chosen.index;
+            const slot = chosen.slot;
+            const task = self.clients[index].task.?;
             self.scheduler.unqueue(index);
             const queued_ms: u64 = @intCast(@max(0, self.now() - task.queued_at));
             self.queued_dispatches += 1;
@@ -650,11 +733,40 @@ const Server = struct {
             self.clients[index].state = .database;
             database.active = task;
             database.active_since = self.now();
+            if (@import("build_options").page_batch and task.read != null and task.read.?.family != .single) {
+                var next = self.scheduler.head;
+                const first = pageInput(task);
+                var bytes = first.viewer.len + first.limit.len + first.offset.len + first.key.len;
+                for (0..read_batch.lookahead) |_| {
+                    if (next == scheduling.none or database.follower_count == database.followers.len) break;
+                    const candidate = next;
+                    next = self.scheduler.nodes[candidate].next;
+                    const other = &self.clients[candidate];
+                    if (other.task.?.read == null or other.task.?.read.?.family != task.read.?.family) continue;
+                    const input = pageInput(other.task.?);
+                    const size = input.viewer.len + input.limit.len + input.offset.len + input.key.len;
+                    if (bytes + size > read_batch.max_parameter_bytes) break;
+                    bytes += size;
+                    self.scheduler.unqueue(candidate);
+                    other.state = .database;
+                    database.followers[database.follower_count] = other.task;
+                    database.follower_count += 1;
+                }
+                if (database.follower_count != 0) {
+                    database.read_group = .pages;
+                    sendPageGroup(database) catch {
+                        self.databaseFailed(slot);
+                        continue;
+                    };
+                    try self.databaseReady(slot, false);
+                    continue;
+                }
+            }
             if (@import("build_options").tag_batch and task.route == .tags) {
                 // Capture only requests already waiting before execution. Nothing
                 // is added after dispatch, and no returned data survives the group.
                 var next = self.scheduler.head;
-                for (0..64) |_| {
+                for (0..read_batch.lookahead) |_| {
                     if (next == scheduling.none or database.follower_count == database.followers.len) break;
                     const candidate = next;
                     next = self.scheduler.nodes[candidate].next;
@@ -671,7 +783,7 @@ const Server = struct {
                 inputs[0] = .{ .viewer = task.params[0].?, .slug = task.params[1].? };
                 var bytes = inputs[0].viewer.len + inputs[0].slug.len;
                 var next = self.scheduler.head;
-                for (0..64) |_| {
+                for (0..read_batch.lookahead) |_| {
                     if (next == scheduling.none or database.follower_count == database.followers.len) break;
                     const candidate = next;
                     next = self.scheduler.nodes[candidate].next;
@@ -807,6 +919,13 @@ fn listen(host: []const u8, port: u16) !c_int {
     return fd;
 }
 
+fn isWrite(route: http.Route) bool {
+    return switch (route) {
+        .register, .update, .follow, .unfollow, .create_article, .update_article, .delete_article, .favorite, .unfavorite, .create_comment, .delete_comment => true,
+        else => false,
+    };
+}
+
 fn share(total: usize, reactor_id: usize) usize {
     return total / reactor_count + @intFromBool(reactor_id < total % reactor_count);
 }
@@ -841,7 +960,10 @@ fn runReactor(config: Config, allocator: std.mem.Allocator, io: std.Io, reactor_
         if (database.active) |task| task.destroy(allocator);
         for (database.followers[0..database.follower_count]) |task| task.?.destroy(allocator);
     };
-    for (databases) |*database| database.connection = try pg.connect(url, io);
+    for (databases, 0..) |*database, index| {
+        database.writer = index < share(write_connections, reactor_id);
+        database.connection = try pg.connect(url, io);
+    }
     var loop = try events.Loop.init();
     defer loop.deinit();
     const listener = try listen(host, port);
@@ -898,6 +1020,7 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = scheduling;
     _ = read_batch;
+    _ = page_batch;
     _ = http;
     _ = @import("auth.zig");
     _ = bcrypt;

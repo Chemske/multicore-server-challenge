@@ -57,6 +57,10 @@ class Proxy:
         self.drop_commit = threading.Event()
         self.commit_dropped = threading.Event()
         self.sessions = []
+        self.hold_counts = False
+        self.count_seen = threading.Event()
+        self.release_counts = threading.Event()
+        self.release_counts.set()
         self.threads = []
 
     def launch(self, function, *args):
@@ -83,7 +87,7 @@ class Proxy:
                 if client is not None:
                     client.close()
                 continue
-            session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'article_groups': 0, 'article_single': 0, 'comment_groups': 0, 'comment_single': 0, 'pause': self.pause_new}
+            session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'article_groups': 0, 'article_single': 0, 'comment_groups': 0, 'comment_single': 0, 'page_groups': 0, 'count_groups': 0, 'page_queries': 0, 'count_queries': 0, 'pause': self.pause_new}
             self.sessions.append(session)
             self.launch(self.frontend, session)
             self.launch(self.backend, session)
@@ -119,6 +123,14 @@ class Proxy:
                     elif name == b'page_single': session['article_single'] += 1
                     elif name == b'batch_comments': session['comment_groups'] += 1
                     elif name == b'comments': session['comment_single'] += 1
+                    elif name.startswith(b'batch_page_'): session['page_groups'] += 1
+                    elif name.startswith(b'batch_count_'): session['count_groups'] += 1
+                    elif name.startswith(b'page_'): session['page_queries'] += 1
+                    elif name.startswith(b'count_'): session['count_queries'] += 1
+                    if self.hold_counts and name.startswith(b'batch_count_'):
+                        self.count_seen.set()
+                        while not self.stopping and not self.release_counts.wait(0.1):
+                            pass
                 backend.sendall(header + body)
         except (OSError, EOFError):
             pass
@@ -193,10 +205,10 @@ def main():
             eventually(lambda: len(proxy.sessions) >= after)
             eventually(ready)
             idle()
-            eventually(lambda: all(len(s['prepared']) == 22 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
+            eventually(lambda: all(len(s['prepared']) == 32 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
 
         rebuilt(connection_count)
-        checks.append('all owners finish session setup and twenty-two named preparations before use')
+        checks.append('all owners finish session setup and thirty-two named preparations before use')
         accepted = len(proxy.sessions)
         kill(one=True)
         rebuilt(accepted + 1)
