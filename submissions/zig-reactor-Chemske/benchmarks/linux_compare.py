@@ -51,6 +51,8 @@ def main():
     p.add_argument('--tail', default='3s')
     p.add_argument('--conformance', action='store_true')
     args = p.parse_args()
+    if sys.platform != 'linux':
+        p.error('this harness requires Linux /proc and loopback aliases')
     builds = {label: Path(binary).resolve() for label, binary in (v.split('=', 1) for v in args.variant)}
     if set(args.order) - builds.keys() or not args.order:
         p.error('every order label must have a variant')
@@ -77,9 +79,12 @@ def main():
                 summary.write_text(json.dumps(report, indent=2) + '\n')
         for index, label in enumerate(args.order):
             name = f'{index + 1:02d}-{label}'
-            with Server(out, 'linux-comparison', 'linuxbench', f'n{index}', builds[label], template='conduit_seed') as server:
+            with Server(out, 'linux-comparison', 'linuxbench', f'n{index}', builds[label], template='conduit_seed', listen_host='0.0.0.0') as server:
                 output = out / f'{name}.json'
-                command = [str(loadgen), 'run', '-target', f'http://127.0.0.1:{server.port}',
+                # The upstream client retains one TCP connection per virtual user.
+                # Four destination aliases avoid the local ~28k-port ceiling.
+                targets = ','.join(f'http://127.0.0.{part}:{server.port}' for part in range(1, 5))
+                command = [str(loadgen), 'run', '-target', targets,
                            '-users', str(args.users), '-think-scale', str(args.think_scale),
                            '-ramp', args.ramp, '-measure', args.measure, '-tail', args.tail,
                            '-articles', '500000', '-secret', server.secret,
