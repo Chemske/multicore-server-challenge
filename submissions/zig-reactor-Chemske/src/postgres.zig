@@ -5,6 +5,7 @@ const profiles = @import("profiles.zig");
 const articles = @import("articles.zig");
 const operations = @import("operations.zig");
 const read_batch = @import("read_batch.zig");
+const page_batch = @import("page_batch.zig");
 pub const prepared_queries = @import("build_options").prepared_queries;
 
 // Minimal declarations from PostgreSQL 18's public libpq-fe.h ABI.
@@ -147,7 +148,12 @@ fn prepareItem(index: usize) ?struct { name: [:0]const u8, sql: [:0]const u8 } {
     const offset = index - routes.len;
     if (offset == 11) return .{ .name = "batch_single", .sql = read_batch.single_sql };
     if (offset == 12) return .{ .name = "batch_comments", .sql = read_batch.comments_sql };
-    if (offset > 12) return null;
+    if (offset >= 13) {
+        const item = offset - 13;
+        if (item >= 10) return null;
+        const family: articles.Family = @fromBackingInt(@intCast(item % 5));
+        return .{ .name = page_batch.name(family, item >= 5), .sql = page_batch.statement(family, item >= 5) };
+    }
     const read: articles.Read = .{
         .family = @fromBackingInt(@intCast(if (offset < 6) offset else offset - 6)),
         .phase = if (offset < 6) .page else .count,
@@ -317,8 +323,8 @@ pub fn sendReadBatch(conn: *Conn, inputs: []const read_batch.Input, allocator: s
     } else try send(conn, if (comments) read_batch.comments_sql else read_batch.single_sql, &.{ params[0], params[1] });
 }
 
-pub fn commentsBatchBounds(result: *Result, expected: usize, bounds: *[read_batch.capacity + 1]usize) !void {
-    if (PQresultStatus(result) != 2 or PQnfields(result) != 10) return error.DatabaseResult;
+pub fn readBatchBounds(result: *Result, expected: usize, columns: c_int, bounds: *[read_batch.capacity + 1]usize) !void {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != columns) return error.DatabaseResult;
     const count: usize = @intCast(PQntuples(result));
     if (count < expected or count > expected * 100) return error.DatabaseResult;
     var previous: usize = 0;
@@ -343,6 +349,32 @@ pub fn commentsBatchRows(result: *Result, begin: usize, end: usize, allocator: s
     var total: usize = 0;
     for (rows, begin..) |*comment, row| comment.* = try commentAt(result, @intCast(row), 2, allocator, &total);
     return rows;
+}
+
+pub fn sendPageBatch(conn: *Conn, inputs: []const page_batch.Input, allocator: std.mem.Allocator, family: articles.Family, count: bool) !void {
+    const params = try page_batch.parameters(allocator, inputs);
+    if (prepared_queries) {
+        const values = [_]?[*:0]const u8{ params[0].ptr, params[1].ptr, params[2].ptr, params[3].ptr };
+        if (PQsendQueryPrepared(conn, page_batch.name(family, count).ptr, 4, &values, null, null, 0) != 1) return error.DatabaseQuery;
+    } else try send(conn, page_batch.statement(family, count), &.{ params[0], params[1], params[2], params[3] });
+}
+
+pub fn pageBatchRows(result: *Result, begin: usize, end: usize, allocator: std.mem.Allocator) ![]articles.Article {
+    if (begin >= end or end - begin > 100) return error.DatabaseResult;
+    if (cell(result, @intCast(begin), 1) == null) {
+        if (end != begin + 1) return error.DatabaseResult;
+        return &.{};
+    }
+    const rows = try allocator.alloc(articles.Article, end - begin);
+    var total: usize = 0;
+    for (rows, begin..) |*article, row| article.* = try articleAt(result, @intCast(row), 1, allocator, false, &total);
+    return rows;
+}
+
+pub fn pageBatchCount(result: *Result, row: usize) !i64 {
+    const value = std.fmt.parseInt(i64, try required(result, @intCast(row), 1), 10) catch return error.DatabaseResult;
+    if (value < 0 or value > 1000) return error.DatabaseResult;
+    return value;
 }
 
 pub fn checkSingleBatch(result: *Result, expected: usize) !void {

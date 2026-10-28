@@ -1,7 +1,8 @@
 const std = @import("std");
 
 pub const Input = struct { viewer: []const u8, slug: []const u8 };
-pub const capacity = 32;
+pub const capacity = @import("build_options").read_batch_size;
+pub const lookahead = @max(64, capacity * 4);
 pub const max_parameter_bytes = 256 * 1024;
 
 // Only requests captured before dispatch share this statement snapshot. Article
