@@ -83,7 +83,7 @@ class Proxy:
                 if client is not None:
                     client.close()
                 continue
-            session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'article_groups': 0, 'article_single': 0, 'pause': self.pause_new}
+            session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'article_groups': 0, 'article_single': 0, 'comment_groups': 0, 'comment_single': 0, 'pause': self.pause_new}
             self.sessions.append(session)
             self.launch(self.frontend, session)
             self.launch(self.backend, session)
@@ -117,6 +117,8 @@ class Proxy:
                     if name == b'tags': session['tags'] += 1
                     elif name == b'batch_single': session['article_groups'] += 1
                     elif name == b'page_single': session['article_single'] += 1
+                    elif name == b'batch_comments': session['comment_groups'] += 1
+                    elif name == b'comments': session['comment_single'] += 1
                 backend.sendall(header + body)
         except (OSError, EOFError):
             pass
@@ -155,7 +157,7 @@ class Proxy:
 
 @contextmanager
 def lock_tags(server, mode='SHARE', table='tags'):
-    assert mode in ('SHARE', 'ACCESS EXCLUSIVE') and table in ('tags', 'articles')
+    assert mode in ('SHARE', 'ACCESS EXCLUSIVE') and table in ('tags', 'articles', 'users')
     with (results / 'locker.log').open('a') as log:
         process = subprocess.Popen(['psql', '-X', '-v', 'ON_ERROR_STOP=1', '-d', server.database,
                                     '-c', f'BEGIN; LOCK TABLE {table} IN {mode} MODE; SELECT pg_sleep(30); ROLLBACK'],
@@ -191,10 +193,10 @@ def main():
             eventually(lambda: len(proxy.sessions) >= after)
             eventually(ready)
             idle()
-            eventually(lambda: all(len(s['prepared']) == 21 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
+            eventually(lambda: all(len(s['prepared']) == 22 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
 
         rebuilt(connection_count)
-        checks.append('all owners finish session setup and twenty-one named preparations before use')
+        checks.append('all owners finish session setup and twenty-two named preparations before use')
         accepted = len(proxy.sessions)
         kill(one=True)
         rebuilt(accepted + 1)

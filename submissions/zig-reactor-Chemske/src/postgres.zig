@@ -146,7 +146,8 @@ fn prepareItem(index: usize) ?struct { name: [:0]const u8, sql: [:0]const u8 } {
     if (index < routes.len) return .{ .name = statementName(routes[index], null), .sql = querySql(routes[index], null) };
     const offset = index - routes.len;
     if (offset == 11) return .{ .name = "batch_single", .sql = read_batch.single_sql };
-    if (offset > 11) return null;
+    if (offset == 12) return .{ .name = "batch_comments", .sql = read_batch.comments_sql };
+    if (offset > 12) return null;
     const read: articles.Read = .{
         .family = @fromBackingInt(@intCast(if (offset < 6) offset else offset - 6)),
         .phase = if (offset < 6) .page else .count,
@@ -308,12 +309,40 @@ fn articleAt(result: *Result, row: c_int, offset: c_int, allocator: std.mem.Allo
     };
 }
 
-pub fn sendSingleBatch(conn: *Conn, inputs: []const read_batch.Input, allocator: std.mem.Allocator) !void {
+pub fn sendReadBatch(conn: *Conn, inputs: []const read_batch.Input, allocator: std.mem.Allocator, comments: bool) !void {
     const params = try read_batch.parameters(allocator, inputs);
     if (prepared_queries) {
         const values = [_]?[*:0]const u8{ params[0].ptr, params[1].ptr };
-        if (PQsendQueryPrepared(conn, "batch_single", 2, &values, null, null, 0) != 1) return error.DatabaseQuery;
-    } else try send(conn, read_batch.single_sql, &.{ params[0], params[1] });
+        if (PQsendQueryPrepared(conn, if (comments) "batch_comments" else "batch_single", 2, &values, null, null, 0) != 1) return error.DatabaseQuery;
+    } else try send(conn, if (comments) read_batch.comments_sql else read_batch.single_sql, &.{ params[0], params[1] });
+}
+
+pub fn commentsBatchBounds(result: *Result, expected: usize, bounds: *[read_batch.capacity + 1]usize) !void {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != 10) return error.DatabaseResult;
+    const count: usize = @intCast(PQntuples(result));
+    if (count < expected or count > expected * 100) return error.DatabaseResult;
+    var previous: usize = 0;
+    for (0..count) |row| {
+        const ordinal = std.fmt.parseInt(usize, try required(result, @intCast(row), 0), 10) catch return error.DatabaseResult;
+        if (ordinal == 0 or ordinal > expected or ordinal < previous or ordinal > previous + 1) return error.DatabaseResult;
+        if (ordinal != previous) bounds[ordinal - 1] = row;
+        previous = ordinal;
+    }
+    if (previous != expected) return error.DatabaseResult;
+    bounds[expected] = count;
+}
+
+pub fn commentsBatchRows(result: *Result, begin: usize, end: usize, allocator: std.mem.Allocator) !?[]operations.Comment {
+    if (begin >= end or end - begin > 100) return error.DatabaseResult;
+    if (cell(result, @intCast(begin), 1) == null) return null;
+    if (cell(result, @intCast(begin), 2) == null) {
+        if (end != begin + 1) return error.DatabaseResult;
+        return &.{};
+    }
+    const rows = try allocator.alloc(operations.Comment, end - begin);
+    var total: usize = 0;
+    for (rows, begin..) |*comment, row| comment.* = try commentAt(result, @intCast(row), 2, allocator, &total);
+    return rows;
 }
 
 pub fn checkSingleBatch(result: *Result, expected: usize) !void {
@@ -356,28 +385,29 @@ fn commentRows(result: *Result, allocator: std.mem.Allocator, single: bool, offs
     if (offset == 1 and count == 1 and PQgetisnull(result, 0, 1) != 0) return &.{};
     const comments = try allocator.alloc(operations.Comment, count);
     var total: usize = 0;
-    for (comments, 0..) |*comment, index| {
-        const row: c_int = @intCast(index);
-        for (0..8) |column| {
-            total += @intCast(PQgetlength(result, row, @as(c_int, @intCast(column)) + offset));
-            if (total > 4 * 1024 * 1024) return error.ResponseTooLarge;
-        }
-        const id = std.fmt.parseInt(i64, try required(result, row, offset + 0), 10) catch return error.DatabaseResult;
-        if (id <= 0) return error.DatabaseResult;
-        comment.* = .{
-            .id = id,
-            .body = try textCell(result, row, offset + 1, allocator),
-            .createdAt = try textCell(result, row, offset + 2, allocator),
-            .updatedAt = try textCell(result, row, offset + 3, allocator),
-            .author = .{
-                .username = try textCell(result, row, offset + 4, allocator),
-                .bio = try nullableCell(result, row, offset + 5, allocator),
-                .image = try nullableCell(result, row, offset + 6, allocator),
-                .following = try boolean(result, row, offset + 7),
-            },
-        };
-    }
+    for (comments, 0..) |*comment, index| comment.* = try commentAt(result, @intCast(index), offset, allocator, &total);
     return comments;
+}
+
+fn commentAt(result: *Result, row: c_int, offset: c_int, allocator: std.mem.Allocator, total: *usize) !operations.Comment {
+    for (0..8) |column| {
+        total.* += @intCast(PQgetlength(result, row, @as(c_int, @intCast(column)) + offset));
+        if (total.* > 4 * 1024 * 1024) return error.ResponseTooLarge;
+    }
+    const id = std.fmt.parseInt(i64, try required(result, row, offset + 0), 10) catch return error.DatabaseResult;
+    if (id <= 0) return error.DatabaseResult;
+    return .{
+        .id = id,
+        .body = try textCell(result, row, offset + 1, allocator),
+        .createdAt = try textCell(result, row, offset + 2, allocator),
+        .updatedAt = try textCell(result, row, offset + 3, allocator),
+        .author = .{
+            .username = try textCell(result, row, offset + 4, allocator),
+            .bio = try nullableCell(result, row, offset + 5, allocator),
+            .image = try nullableCell(result, row, offset + 6, allocator),
+            .following = try boolean(result, row, offset + 7),
+        },
+    };
 }
 
 pub fn operationResult(result: *Result, operation: *operations.Operation, allocator: std.mem.Allocator) !u16 {

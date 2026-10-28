@@ -24,6 +24,30 @@ pub const single_sql =
     \\ FROM requested r LEFT JOIN selected a ON a.slug=r.slug ORDER BY r.ordinal
 ;
 
+// The article and newest-comment rows are read once per distinct slug inside
+// this statement. Following flags remain specific to each captured viewer.
+pub const comments_sql =
+    \\WITH requested AS MATERIALIZED (
+    \\ SELECT * FROM unnest($1::bigint[], $2::text[]) WITH ORDINALITY AS r(viewer, slug, ordinal)
+    \\), targets AS MATERIALIZED (
+    \\ SELECT a.id,a.slug FROM articles a JOIN (SELECT DISTINCT slug FROM requested) k ON k.slug=a.slug
+    \\), content AS MATERIALIZED (
+    \\ SELECT t.slug,t.id AS article_id,c.id,c.body,c.created_at AS created_sort,
+    \\ to_char(c.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+    \\ to_char(c.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+    \\ c.author_id,c.username,c.bio,c.image FROM targets t LEFT JOIN LATERAL (
+    \\ SELECT c.id,c.body,c.created_at,c.updated_at,c.author_id,u.username,u.bio,u.image
+    \\ FROM comments c JOIN users u ON u.id=c.author_id WHERE c.article_id=t.id
+    \\ ORDER BY c.created_at DESC,c.id DESC LIMIT 100
+    \\ ) c ON true
+    \\), viewers AS MATERIALIZED (
+    \\ SELECT k.viewer,ARRAY(SELECT fo.followee_id FROM follows fo WHERE fo.follower_id=k.viewer) AS followed
+    \\ FROM (SELECT DISTINCT viewer FROM requested) k
+    \\) SELECT r.ordinal,c.article_id,c.id,c.body,c.created_at,c.updated_at,c.username,c.bio,c.image,
+    \\ c.author_id=ANY(v.followed) FROM requested r JOIN viewers v ON v.viewer=r.viewer
+    \\ LEFT JOIN content c ON c.slug=r.slug ORDER BY r.ordinal,c.created_sort DESC,c.id DESC
+;
+
 pub fn parameters(allocator: std.mem.Allocator, inputs: []const Input) ![2][:0]const u8 {
     if (inputs.len == 0 or inputs.len > capacity) return error.BatchSize;
     var viewers: std.ArrayList(u8) = .empty;
