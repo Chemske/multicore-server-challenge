@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(usize, "max_clients", clients);
     options.addOption(bool, "tag_batch", b.option(bool, "tag-batch", "Coalesce already queued tag reads (maximum 32)") orelse true);
     options.addOption(bool, "article_batch", b.option(bool, "article-batch", "Batch already queued single-article reads") orelse true);
+    options.addOption(bool, "comments_batch", b.option(bool, "comments-batch", "Batch already queued comment lists") orelse true);
     options.addOption(bool, "generic_plans", b.option(bool, "generic-plans", "Reuse generic plans on owned connections") orelse true);
     const bcrypt_workers = b.option(usize, "bcrypt-workers", "Bounded bcrypt workers (1-8)") orelse 4;
     if (bcrypt_workers < reactors or bcrypt_workers > 8) @panic("bcrypt-workers must be between reactors and 8");

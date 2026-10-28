@@ -29,7 +29,7 @@ const Database = struct {
     fd: c_int = -1,
     followers: [31]?*requests.Task = @splat(null),
     follower_count: usize = 0,
-    article_group: bool = false,
+    read_group: enum { none, article, comments } = .none,
 };
 const State = enum { closed, reading, queued, database, hashing, writing };
 const Client = struct {
@@ -394,17 +394,17 @@ const Server = struct {
     fn finishReadFollowers(self: *Server, database: *Database, status: u16, body: []const u8) void {
         const count = database.follower_count;
         database.follower_count = 0;
-        database.article_group = false;
+        database.read_group = .none;
         for (database.followers[0..count]) |task| self.finish(task.?, status, body);
     }
 
-    fn finishArticle(self: *Server, task: *requests.Task) void {
+    fn finishReadGroupTask(self: *Server, task: *requests.Task) void {
         if (!self.isLive(task)) {
             self.releaseTask(task);
         } else if (task.status != 200) {
             self.finish(task, task.status, "{\"errors\":{\"body\":[\"query failed\"]}}");
         } else {
-            const body = task.read.?.json(task.arena.allocator()) catch {
+            const body = (if (task.read) |read| read.json(task.arena.allocator()) else task.operation.?.json(task.arena.allocator())) catch {
                 self.finish(task, 503, "{\"errors\":{\"body\":[\"article response unavailable\"]}}");
                 return;
             };
@@ -412,12 +412,30 @@ const Server = struct {
         }
     }
 
-    fn articleGroupResult(self: *Server, database: *Database, result: *pg.Result) void {
+    fn readGroupResult(self: *Server, database: *Database, result: *pg.Result) void {
         _ = self;
         var members: [read_batch.capacity]*requests.Task = undefined;
         members[0] = database.active.?;
         for (database.followers[0..database.follower_count], 1..) |task, index| members[index] = task.?;
         const group = members[0 .. database.follower_count + 1];
+        if (database.read_group == .comments) {
+            var bounds: [read_batch.capacity + 1]usize = undefined;
+            pg.commentsBatchBounds(result, group.len, &bounds) catch {
+                for (group) |task| task.status = 503;
+                return;
+            };
+            for (group, 0..) |task, index| {
+                const comments = pg.commentsBatchRows(result, bounds[index], bounds[index + 1], task.arena.allocator()) catch {
+                    task.status = 503;
+                    continue;
+                };
+                if (comments) |rows| {
+                    task.operation.?.comments = rows;
+                    task.status = 200;
+                } else task.status = 404;
+            }
+            return;
+        }
         pg.checkSingleBatch(result, group.len) catch {
             for (group) |task| task.status = 503;
             return;
@@ -487,13 +505,13 @@ const Server = struct {
             const task = database.active.?;
             const result = pg.PQgetResult(connection) orelse {
                 // The statement is fully drained, including its transaction completion.
-                if (database.article_group) {
+                if (database.read_group != .none) {
                     const count = database.follower_count;
                     database.follower_count = 0;
-                    database.article_group = false;
+                    database.read_group = .none;
                     database.active = null;
-                    for (database.followers[0..count]) |other| self.finishArticle(other.?);
-                    self.finishArticle(task);
+                    for (database.followers[0..count]) |other| self.finishReadGroupTask(other.?);
+                    self.finishReadGroupTask(task);
                     return;
                 }
                 if (task.operation) |*operation| {
@@ -570,8 +588,8 @@ const Server = struct {
                 return;
             };
             defer pg.PQclear(result);
-            if (database.article_group) {
-                self.articleGroupResult(database, result);
+            if (database.read_group != .none) {
+                self.readGroupResult(database, result);
                 continue;
             }
             task.status = pg.status(result);
@@ -648,7 +666,7 @@ const Server = struct {
                     database.follower_count += 1;
                 }
             }
-            if (@import("build_options").article_batch and task.route == .article) {
+            if ((@import("build_options").article_batch and task.route == .article) or (@import("build_options").comments_batch and task.route == .comments)) {
                 var inputs: [read_batch.capacity]read_batch.Input = undefined;
                 inputs[0] = .{ .viewer = task.params[0].?, .slug = task.params[1].? };
                 var bytes = inputs[0].viewer.len + inputs[0].slug.len;
@@ -658,7 +676,7 @@ const Server = struct {
                     const candidate = next;
                     next = self.scheduler.nodes[candidate].next;
                     const other = &self.clients[candidate];
-                    if (other.task.?.route != .article) continue;
+                    if (other.task.?.route != task.route) continue;
                     const input: read_batch.Input = .{ .viewer = other.task.?.params[0].?, .slug = other.task.?.params[1].? };
                     if (bytes + input.viewer.len + input.slug.len > read_batch.max_parameter_bytes) break;
                     bytes += input.viewer.len + input.slug.len;
@@ -669,8 +687,8 @@ const Server = struct {
                     inputs[database.follower_count] = input;
                 }
                 if (database.follower_count != 0) {
-                    database.article_group = true;
-                    pg.sendSingleBatch(database.connection.?, inputs[0 .. database.follower_count + 1], task.arena.allocator()) catch {
+                    database.read_group = if (task.route == .comments) .comments else .article;
+                    pg.sendReadBatch(database.connection.?, inputs[0 .. database.follower_count + 1], task.arena.allocator(), task.route == .comments) catch {
                         self.databaseFailed(slot);
                         continue;
                     };
