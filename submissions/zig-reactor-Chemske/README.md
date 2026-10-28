@@ -4,9 +4,9 @@ Front: direct
 
 This submission implements the complete Conduit API for the Multicore Server Challenge in Zig. The idea is to reduce work per request across the whole machine, especially PostgreSQL, while keeping admission, memory and failure recovery bounded.
 
-The server uses one readiness-driven reactor, four owned non-blocking PostgreSQL connections and a bounded bcrypt pool. It prepares twenty-one queries, batches compatible tags and single-article reads already waiting before dispatch, and keeps mutations on an isolated durable transaction path. It never caches database data, JWT checks or bcrypt results.
+The server uses independent readiness reactors, owned non-blocking PostgreSQL connections and bounded bcrypt workers. Each reactor owns its listeners, clients, queues and database sessions. Compatible tags, articles, comments and list pages already waiting before dispatch share SQL work. Dedicated write owners keep reads progressing during slow commits. It never caches database data, JWT checks or bcrypt results.
 
-**Validation:** the clean Ubuntu 24.04 x86_64 installer, Linux build and unchanged 197-step conformance suite pass with PostgreSQL 18. On native macOS, Zig passes all 197 steps on development and full seeds. All 197 development responses match Go; in the final full-seed comparison, Go times out on the very large offset test and its other 196 responses match. See [VALIDATION.md](docs/VALIDATION.md) for the retained failure evidence. Local performance evidence is documented below; an official leaderboard score remains pending.
+**First official result:** [version 1](https://github.com/arjaythedev/multicore-server-challenge/pull/73) held 20,000 users for five minutes at 5,241 requests/s. Its 2,048-task admission ceiling rejected work above that level with CPU still available. The scaling changes and new Linux measurements are described in [SCALING.md](docs/SCALING.md); they do not establish a new official score. Historical Mac measurements remain in [PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Stack
 
@@ -57,6 +57,8 @@ python3 tests/milestone4.py
 python3 tests/milestone5.py
 python3 tests/tag_batch.py
 python3 tests/article_batch.py
+python3 tests/comment_batch.py
+python3 tests/page_batch.py
 python3 tests/connections.py
 python3 tests/recovery.py
 python3 tests/full_seed.py
@@ -73,7 +75,7 @@ TEMPLATE=conduit_seed PORT=3105 bash ../../test/run.sh .
 
 The full-seed commands require the unchanged official full seed in the dedicated cluster. Seed generation is not implicit: allow disk space for the template, one temporary clone and WAL. `tests/full_seed.py` runs Zig and Go sequentially so two full clones are never retained together. Each integration harness removes its temporary servers and databases, including on failure.
 
-There are sixteen Zig unit checks and focused groups covering HTTP framing, auth, profiles, article/feed reads, mutations, commit visibility, rollback, disconnected clients and database recovery. The many-connection check uses 8,000 actual sockets with slot replacement and pressure/deadline cases; a separate scheduler unit check exercises 100,000 simulated slots. Neither establishes 100,000 live connections on Linux.
+There are nineteen Zig unit checks and focused groups covering HTTP framing, auth, profiles, article/feed reads, mutations, commit visibility, rollback, disconnected clients and database recovery. The many-connection check uses 8,000 actual sockets with slot replacement and pressure/deadline cases; a separate scheduler unit check exercises 100,000 simulated slots. Neither establishes 100,000 live connections on Linux.
 
 The optional `python3 tests/recovery.py --restart-cluster` restarts only the dedicated project cluster and temporarily interrupts the interactive server. It is kept separate from routine editor tasks.
 
@@ -83,7 +85,7 @@ Every applicable request verifies its token; every login reads and verifies the 
 
 Article lists select page IDs before enrichment and then read the capped count in a separate statement, preserving that reference snapshot order. Counts stop at 1,000 without hiding later pages. Viewer flags, filter precedence, text arrays and UTC millisecond timestamps are computed per request. The feed uses overflow-safe arithmetic for the allowed large offsets.
 
-Comment listing combines article lookup and newest-100 comments into one prepared statement, with explicit ordering and a distinction between missing articles and empty lists. It therefore uses one statement snapshot; a concurrent deletion can be observed differently from the reference's two-query path. Grouped tags and single-article requests also share one statement snapshot. Article groups retain each request's viewer-specific flags and missing-article status. No later request joins a dispatched group or reuses its result.
+Comment listing combines article lookup and newest-100 comments into one prepared statement, with explicit ordering and a distinction between missing articles and empty lists. It therefore uses one statement snapshot; a concurrent deletion can be observed differently from the reference's two-query path. Grouped reads share a statement snapshot. Article, comment and page groups retain each request's viewer-specific flags and missing-resource status. List pages still precede a separate count statement. No later request joins a dispatched group or reuses its result.
 
 Writes wait for confirmed commit. Article/tag/link creation is atomic. Failed transactions drain and roll back before reuse. Lost connections retire the active operation without replay, including a write whose COMMIT acknowledgement was lost. Healthy owners continue serving while another reconnects and rebuilds settings/prepared statements.
 
