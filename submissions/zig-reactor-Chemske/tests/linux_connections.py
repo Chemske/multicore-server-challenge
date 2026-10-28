@@ -1,4 +1,4 @@
-"""Validate 100,000 live Linux sockets; this is not a workload-capacity score."""
+"""Validate 150,000 live Linux sockets; this is not a workload-capacity score."""
 import argparse
 import errno
 import json
@@ -13,10 +13,10 @@ import time
 from support import Server, raw_response
 
 p = argparse.ArgumentParser(description=__doc__)
-p.add_argument('--connections', type=int, default=100000)
+p.add_argument('--connections', type=int, default=150000)
 args = p.parse_args()
 assert sys.platform == 'linux', 'run on Linux; do not change the Mac kernel limits'
-assert 1000 <= args.connections <= 120000
+assert 1000 <= args.connections <= 180000
 assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] > args.connections + 128
 work = Path(os.environ['CHALLENGE_WORK'])
 submission = Path(__file__).resolve().parents[1]
@@ -45,7 +45,7 @@ with Server(results, 'linux-sockets-test-only', 'linuxsockets', 'scale', submiss
                     # Explicit unique ports avoid quadratic bind(0) searches
                     # as each source address fills its ephemeral range.
                     peer.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    peer.bind((f'127.0.0.{2 + created % 4}', 20000 + created // 4))
+                    peer.bind((f'127.0.0.{2 + created % 8}', 20000 + created // 8))
                     result = peer.connect_ex(('127.0.0.1', server.port))
                     assert result in (0, errno.EINPROGRESS), result
                     selector.register(peer, selectors.EVENT_WRITE)
@@ -88,7 +88,7 @@ with Server(results, 'linux-sockets-test-only', 'linuxsockets', 'scale', submiss
         (results / 'results.json').write_text(json.dumps({'live_sockets': len(peers),
             'http_validated_sockets': len(peers), 'server_descriptors': descriptor_count,
             'open_seconds': opened_seconds, 'rss_mib': rss, 'idle_cpu_pct_one_core': idle_cpu,
-            'scope': 'Live socket ownership and reuse only; not 100000 workload users or an official capacity score.'}, indent=2) + '\n')
+            'scope': 'Live socket ownership and reuse only; not a workload capacity result or an official capacity score.'}, indent=2) + '\n')
         print(f'PASS: {len(peers)} live Linux sockets, every socket answered HTTP; RSS {rss:.1f} MiB; idle CPU {idle_cpu:.2f}% of one core', flush=True)
     except BaseException:
         (results / 'failure.json').write_text(json.dumps({'connected': len(peers), 'pending': len(pending),

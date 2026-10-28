@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
     const writers = b.option(usize, "write-connections", "Dedicated write connections within the total pool (0 disables partitioning)") orelse 0;
     if (writers != 0 and (writers < reactors or writers + reactors > database_connections)) @panic("each reactor needs at least one read and one write connection");
     options.addOption(usize, "write_connections", writers);
-    const clients = b.option(usize, "max-clients", "Maximum HTTP connections") orelse 131072;
+    const clients = b.option(usize, "max-clients", "Maximum HTTP connections") orelse 196608;
     if (clients < 256 or clients > 262144) @panic("max-clients must be between 256 and 262144");
     options.addOption(usize, "max_clients", clients);
     const read_batch_size = b.option(usize, "read-batch-size", "Maximum requests captured in one read group (2-128)") orelse 32;
@@ -56,4 +56,9 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = module });
     const run_tests = b.addRunArtifact(tests);
     b.step("test", "Run protocol and configuration checks").dependOn(&run_tests.step);
+    const password_module = b.createModule(.{ .root_source_file = b.path("src/bcrypt_lanes.zig"), .target = target, .optimize = optimize });
+    const password_bench_module = b.createModule(.{ .root_source_file = b.path("benchmarks/passwords.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    password_bench_module.addImport("bcrypt_lanes", password_module);
+    const password_bench = b.addExecutable(.{ .name = "password-bench", .root_module = password_bench_module });
+    b.step("password-bench", "Compare scalar and independent bcrypt lanes at cost ten").dependOn(&b.addRunArtifact(password_bench).step);
 }
