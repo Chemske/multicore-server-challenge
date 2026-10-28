@@ -73,13 +73,15 @@ jobs:
           (cd "$baseline/submissions/zig-reactor-Chemske" && zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" --prefix "$CHALLENGE_WORK/build-A")
           cd submissions/zig-reactor-Chemske
           zig build test -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=8 --summary all
-          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=1 -Ddb-connections=8 --prefix "$CHALLENGE_WORK/build-B"
-          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=8 --prefix "$CHALLENGE_WORK/build-C"
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=1 -Ddb-connections=4 --prefix "$CHALLENGE_WORK/build-B"
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=8 -Dmax-tasks=8192 --prefix "$CHALLENGE_WORK/build-C"
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=4 -Ddb-connections=16 -Dmax-tasks=8192 --prefix "$CHALLENGE_WORK/build-D"
       - name: Repeated Linux comparison and unchanged conformance
         run: |
+          sudo prlimit --pid $$ --nofile=200000:200000
           ulimit -n 200000
           cd submissions/zig-reactor-Chemske
-          python3 benchmarks/linux_compare.py --variant "A=$CHALLENGE_WORK/build-A/bin/conduit" --variant "B=$CHALLENGE_WORK/build-B/bin/conduit" --variant "C=$CHALLENGE_WORK/build-C/bin/conduit" --order ABCCBA --users 20000 --ramp 15s --measure 30s --tail 3s --conformance --out "$CHALLENGE_WORK/results/comparison"
+          python3 benchmarks/linux_compare.py --variant "A=$CHALLENGE_WORK/build-A/bin/conduit" --variant "B=$CHALLENGE_WORK/build-B/bin/conduit" --variant "C=$CHALLENGE_WORK/build-C/bin/conduit" --variant "D=$CHALLENGE_WORK/build-D/bin/conduit" --order ABCDDCBA --users 20000 --ramp 15s --measure 30s --tail 3s --conformance --out "$CHALLENGE_WORK/results/comparison"
       - name: Evidence
         if: always()
         uses: actions/upload-artifact@v4
