@@ -862,6 +862,8 @@ const Server = struct {
                 self.closeClient(expired);
             }
             if (current >= self.next_stats) {
+                const password_stats = self.pool.stats();
+                std.log.info("password_stats id={d} outstanding={d} batches_1={d} batches_2={d} batches_3={d} batches_4={d}", .{ self.reactor_id, password_stats.outstanding, password_stats.batches[0], password_stats.batches[1], password_stats.batches[2], password_stats.batches[3] });
                 self.next_stats = current + 10_000;
                 std.log.info("reactor_stats id={d} admitted={d} active={d} peak={d} capacity_503={d} password_503={d} db_failures={d} responses_503={d} dispatches={d} queue_wait_ms={d} queue_max_ms={d} input_bytes={d} output_bytes={d}", .{ self.reactor_id, self.admitted, self.task_count, self.peak_tasks, self.capacity_rejections, self.password_rejections, self.database_failures, self.responses_503, self.queued_dispatches, self.queue_wait_ms, self.max_queue_wait_ms, self.input_bytes, self.output_bytes });
             }

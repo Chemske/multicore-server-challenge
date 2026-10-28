@@ -43,6 +43,12 @@ pub fn build(b: *std.Build) void {
     const bcrypt_jobs = b.option(usize, "bcrypt-jobs", "Maximum outstanding bcrypt jobs (16-128)") orelse 64;
     if (bcrypt_jobs < 16 or bcrypt_jobs > 128) @panic("bcrypt-jobs must be between 16 and 128");
     options.addOption(usize, "bcrypt_jobs", bcrypt_jobs);
+    const password_lanes = b.option(usize, "bcrypt-lanes", "Independent cost-ten hashes per worker batch (1-4)") orelse 1;
+    if (password_lanes < 1 or password_lanes > 4) @panic("bcrypt-lanes must be 1-4");
+    options.addOption(usize, "bcrypt_lanes", password_lanes);
+    const gather_ms = b.option(usize, "bcrypt-gather-ms", "Maximum password batch collection window (0-100 ms)") orelse 0;
+    if (gather_ms > 100 or (password_lanes == 1 and gather_ms != 0)) @panic("bcrypt-gather-ms must be 0-100, and zero for scalar workers");
+    options.addOption(usize, "bcrypt_gather_ms", gather_ms);
     module.addOptions("build_options", options);
     module.addCSourceFile(.{ .file = b.path("vendor/picohttpparser/picohttpparser.c"), .flags = &.{"-std=c99"} });
     module.linkSystemLibrary("pq", .{ .use_pkg_config = .no });

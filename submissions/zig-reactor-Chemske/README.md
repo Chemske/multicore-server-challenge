@@ -87,7 +87,7 @@ Comment listing combines article lookup and newest-100 comments into one prepare
 
 Writes wait for confirmed commit. Article/tag/link creation is atomic. Failed transactions drain and roll back before reuse. Lost connections retire the active operation without replay, including a write whose COMMIT acknowledgement was lost. Healthy owners continue serving while another reconnects and rebuilds settings/prepared statements.
 
-The configured client ceiling is 131,072, reduced to existing descriptor limits at startup (10,204 here on macOS). The server changes only its own soft descriptor limit within the existing hard/kernel ceiling. Tasks, password jobs, aggregate input/output buffers, per-request sizes and deadlines are bounded. Exceeding a limit can return 503 or close a connection; failures stay in benchmark results. Exact limits and ownership are in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The configured client ceiling is 196,608, reduced to existing descriptor limits at startup (10,204 here on macOS). The server changes only its own soft descriptor limit within the existing hard/kernel ceiling. Tasks, password jobs, aggregate input/output buffers, per-request sizes and deadlines are bounded. Exceeding a limit can return 503 or close a connection; failures stay in benchmark results. Exact limits and ownership are in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Evidence
 
@@ -99,4 +99,4 @@ The latest 8,000-user native release hold fails the latency/error targets while 
 
 [BENCHMARKING.md](docs/BENCHMARKING.md) explains honest Mac-to-Ubuntu workload conversion and a small optional Oracle Cloud test layout. [RECOVERY.md](docs/RECOVERY.md) describes the fault matrix, including uncertain commits without replay. [MILESTONES.md](docs/MILESTONES.md) preserves historical checkpoints. [RESEARCH.md](docs/RESEARCH.md) and [COMPETITOR_REVIEW.md](docs/COMPETITOR_REVIEW.md) record the original architecture research and source review.
 
-The organiser's full-seed, five-minute capacity search with separate load generators determines ranking. The local Mac results and Ubuntu conformance checks do not establish an official capacity score or 100,000 live Linux connections.
+The organiser's full-seed, five-minute capacity search with separate load generators determines ranking. A separate Linux test retained 150,000 sockets and checked HTTP responses, as described in [SCALING.md](docs/SCALING.md). Neither that socket test nor the local Mac results establish an official workload capacity score.
