@@ -9,9 +9,10 @@ const bcrypt = @import("bcrypt_pool.zig");
 const scheduling = @import("scheduler.zig");
 const read_batch = @import("read_batch.zig");
 const max_clients = @import("build_options").max_clients;
-const max_tasks = 2048;
-const max_input_bytes = 32 * 1024 * 1024;
-const max_output_bytes = 64 * 1024 * 1024;
+const reactor_count = @import("build_options").reactors;
+const max_tasks = @import("build_options").max_tasks / reactor_count;
+const max_input_bytes = 32 * 1024 * 1024 / reactor_count;
+const max_output_bytes = 64 * 1024 * 1024 / reactor_count;
 const max_input = http.max_head + http.max_body + 4096;
 const database_bit: u64 = 1 << 31;
 const database_connections = @import("build_options").database_connections;
@@ -57,6 +58,18 @@ const Server = struct {
     input_bytes: usize = 0,
     output_bytes: usize = 0,
     listener_retry_at: i64 = 0,
+    reactor_id: usize = 0,
+    next_stats: i64 = 0,
+    admitted: u64 = 0,
+    peak_tasks: usize = 0,
+    capacity_rejections: u64 = 0,
+    password_rejections: u64 = 0,
+    database_failures: u64 = 0,
+    responses_503: u64 = 0,
+    queued_dispatches: u64 = 0,
+    queue_wait_ms: u64 = 0,
+    max_queue_wait_ms: u64 = 0,
+    processing_input: bool = false,
 
     fn now(self: *Server) i64 {
         return std.Io.Clock.awake.now(self.io).toMilliseconds();
@@ -145,6 +158,7 @@ const Server = struct {
             505 => "HTTP Version Not Supported",
             else => "Service Unavailable",
         };
+        if (status == 503) self.responses_503 += 1;
         client.output = if (status == 204)
             try std.fmt.allocPrint(self.allocator, "HTTP/1.1 204 No Content\r\nConnection: {s}\r\n\r\n", .{if (client.keep_alive) @as([]const u8, "keep-alive") else "close"})
         else
@@ -153,10 +167,27 @@ const Server = struct {
         client.sent = 0;
         client.state = .writing;
         self.scheduler.schedule(index, self.now() + 9_000);
-        try self.loop.watch(client.fd, self.token(index), false, true);
+        if (@import("build_options").eager_write) {
+            try self.writeClient(index);
+            if (client.state == .writing) try self.loop.watch(client.fd, self.token(index), false, true);
+        } else try self.loop.watch(client.fd, self.token(index), false, true);
     }
 
-    fn processInput(self: *Server, index: usize) !void {
+    fn processInput(self: *Server, index: usize) anyerror!void {
+        // Eager writes can complete while a synchronous error response is being
+        // parsed. Drain pipelined input iteratively, never recursively.
+        if (self.processing_input) return;
+        self.processing_input = true;
+        defer self.processing_input = false;
+        const client = &self.clients[index];
+        while (client.state == .reading) {
+            const buffered = client.input.items.len;
+            try self.processOneInput(index);
+            if (client.input.items.len == buffered) break;
+        }
+    }
+
+    fn processOneInput(self: *Server, index: usize) !void {
         const client = &self.clients[index];
         switch (http.parse(client.input.items)) {
             .more => {},
@@ -173,6 +204,7 @@ const Server = struct {
                     return;
                 }
                 if (self.task_count == max_tasks) {
+                    self.capacity_rejections += 1;
                     consume(client, request.consumed);
                     try self.respond(index, 503, "{\"errors\":{\"body\":[\"request capacity full\"]}}");
                     return;
@@ -186,6 +218,8 @@ const Server = struct {
                 };
                 consume(client, request.consumed);
                 self.task_count += 1;
+                self.admitted += 1;
+                self.peak_tasks = @max(self.peak_tasks, self.task_count);
                 client.task = task;
                 if (task.needs_hash) self.startHash(task) else self.queue(task);
             },
@@ -203,6 +237,7 @@ const Server = struct {
         const index = task.recipient.index;
         const client = &self.clients[index];
         client.state = .queued;
+        task.queued_at = self.now();
         self.scheduler.enqueue(index);
         self.loop.watch(client.fd, self.token(index), false, false) catch self.closeClient(index);
     }
@@ -218,7 +253,10 @@ const Server = struct {
             self.finish(task, 503, "{\"errors\":{\"body\":[\"random source unavailable\"]}}");
             return;
         };
-        if (!self.pool.submit(&task.job)) self.finish(task, 503, "{\"errors\":{\"body\":[\"password queue full\"]}}");
+        if (!self.pool.submit(&task.job)) {
+            self.password_rejections += 1;
+            self.finish(task, 503, "{\"errors\":{\"body\":[\"password queue full\"]}}");
+        }
     }
 
     fn finish(self: *Server, task: *requests.Task, status: u16, body: []const u8) void {
@@ -335,6 +373,7 @@ const Server = struct {
     }
 
     fn databaseFailed(self: *Server, index: usize) void {
+        self.database_failures += 1;
         const database = &self.databases[index];
         if (database.connection) |connection| pg.PQfinish(connection);
         if (database.opening) |opening| pg.PQfinish(opening.conn);
@@ -585,6 +624,10 @@ const Server = struct {
                 continue;
             };
             self.scheduler.unqueue(index);
+            const queued_ms: u64 = @intCast(@max(0, self.now() - task.queued_at));
+            self.queued_dispatches += 1;
+            self.queue_wait_ms += queued_ms;
+            self.max_queue_wait_ms = @max(self.max_queue_wait_ms, queued_ms);
             const database = &self.databases[slot];
             self.clients[index].state = .database;
             database.active = task;
@@ -688,6 +731,10 @@ const Server = struct {
                 const expired = self.scheduler.expired(current) orelse break;
                 self.closeClient(expired);
             }
+            if (current >= self.next_stats) {
+                self.next_stats = current + 10_000;
+                std.log.info("reactor_stats id={d} admitted={d} active={d} peak={d} capacity_503={d} password_503={d} db_failures={d} responses_503={d} dispatches={d} queue_wait_ms={d} queue_max_ms={d} input_bytes={d} output_bytes={d}", .{ self.reactor_id, self.admitted, self.task_count, self.peak_tasks, self.capacity_rejections, self.password_rejections, self.database_failures, self.responses_503, self.queued_dispatches, self.queue_wait_ms, self.max_queue_wait_ms, self.input_bytes, self.output_bytes });
+            }
             self.maintainDatabases(current);
             if (self.listener_retry_at != 0 and current >= self.listener_retry_at) {
                 self.listener_retry_at = 0;
@@ -703,7 +750,7 @@ extern "c" fn sysctlbyname([*:0]const u8, ?*anyopaque, ?*usize, ?*const anyopaqu
 fn clientCapacity() !usize {
     var limit: c.rlimit = undefined;
     if (c.getrlimit(.NOFILE, &limit) != 0) return error.FileDescriptorLimit;
-    const reserve = database_connections + 32;
+    const reserve = database_connections + 32 + reactor_count * 4;
     var desired: usize = max_clients + reserve;
     if (@import("builtin").os.tag == .macos) {
         var kernel_limit: c_int = 0;
@@ -736,25 +783,29 @@ fn listen(host: []const u8, port: u16) !c_int {
     try events.nonblocking(fd);
     const one: c_int = 1;
     if (c.setsockopt(fd, c.SOL.SOCKET, c.SO.REUSEADDR, &one, @sizeOf(c_int)) < 0) return error.SocketOption;
+    if (reactor_count > 1 and c.setsockopt(fd, c.SOL.SOCKET, c.SO.REUSEPORT, &one, @sizeOf(c_int)) < 0) return error.SocketOption;
     if (c.bind(fd, @ptrCast(&address), @sizeOf(@TypeOf(address))) < 0) return error.Bind;
     if (c.listen(fd, 4096) < 0) return error.Listen;
     return fd;
 }
 
-pub fn main(init: std.process.Init) !void {
-    const env = init.minimal.environ;
-    const url = env.getPosix("DATABASE_URL") orelse return error.MissingDatabaseUrl;
-    const secret = env.getPosix("JWT_SECRET") orelse return error.MissingJwtSecret;
-    if (secret.len == 0) return error.EmptyJwtSecret;
-    const host = env.getPosix("HOST") orelse "127.0.0.1";
-    const port = try std.fmt.parseInt(u16, env.getPosix("PORT") orelse "3000", 10);
-    const allocator = init.gpa;
-    const capacity = try clientCapacity();
+fn share(total: usize, reactor_id: usize) usize {
+    return total / reactor_count + @intFromBool(reactor_id < total % reactor_count);
+}
+
+const Config = struct { url: [*:0]const u8, secret: []const u8, host: []const u8, port: u16, clients: usize };
+
+fn runReactor(config: Config, allocator: std.mem.Allocator, io: std.Io, reactor_id: usize) !void {
+    const capacity = share(config.clients, reactor_id);
+    const url = config.url;
+    const secret = config.secret;
+    const host = config.host;
+    const port = config.port;
     const clients = try allocator.alloc(Client, capacity);
     defer allocator.free(clients);
     @memset(clients, .{});
     var pool: bcrypt.Pool = .{};
-    try pool.start(init.io);
+    try pool.start(io, share(bcrypt.worker_count, reactor_id), share(bcrypt.capacity, reactor_id));
     defer {
         pool.stop();
         var completed: [bcrypt.capacity]*bcrypt.Job = undefined;
@@ -764,14 +815,15 @@ pub fn main(init: std.process.Init) !void {
             task.destroy(allocator);
         }
     }
-    var databases: [database_connections]Database = @splat(.{});
-    defer for (&databases) |*database| {
+    var database_storage: [database_connections]Database = @splat(.{});
+    const databases = database_storage[0..share(database_connections, reactor_id)];
+    defer for (databases) |*database| {
         if (database.connection) |connection| pg.PQfinish(connection);
         if (database.opening) |opening| pg.PQfinish(opening.conn);
         if (database.active) |task| task.destroy(allocator);
         for (database.followers[0..database.follower_count]) |task| task.?.destroy(allocator);
     };
-    for (&databases) |*database| database.connection = try pg.connect(url, init.io);
+    for (databases) |*database| database.connection = try pg.connect(url, io);
     var loop = try events.Loop.init();
     defer loop.deinit();
     const listener = try listen(host, port);
@@ -780,10 +832,11 @@ pub fn main(init: std.process.Init) !void {
     defer scheduler.deinit(allocator);
     var server: Server = .{
         .allocator = allocator,
-        .io = init.io,
+        .io = io,
         .loop = loop,
         .listener = listener,
-        .databases = &databases,
+        .databases = databases,
+        .reactor_id = reactor_id,
         .database_url = url,
         .clients = clients,
         .pool = &pool,
@@ -793,8 +846,35 @@ pub fn main(init: std.process.Init) !void {
     defer {
         for (0..clients.len) |index| server.closeClient(index);
     }
-    std.log.info("all API routes on {s}:{d}; {d} database connections, {d} client slots, {d} bcrypt workers, prepared API queries: {}", .{ host, port, database_connections, capacity, bcrypt.worker_count, pg.prepared_queries });
+    std.log.info("reactor {d} thread={d}: all API routes on {s}:{d}; {d} database connections, {d} client slots, {d} bcrypt workers, prepared API queries: {}", .{ reactor_id, std.Thread.getCurrentId(), host, port, databases.len, capacity, share(bcrypt.worker_count, reactor_id), pg.prepared_queries });
     try server.run();
+}
+
+fn reactorEntry(config: Config, allocator: std.mem.Allocator, io: std.Io, reactor_id: usize) void {
+    runReactor(config, allocator, io, reactor_id) catch |err| {
+        std.log.err("reactor {d} failed: {s}", .{ reactor_id, @errorName(err) });
+        // A failed reactor fails the process. No worker is silently restarted.
+        std.process.exit(1);
+    };
+}
+
+pub fn main(init: std.process.Init) !void {
+    const env = init.minimal.environ;
+    const url = env.getPosix("DATABASE_URL") orelse return error.MissingDatabaseUrl;
+    const secret = env.getPosix("JWT_SECRET") orelse return error.MissingJwtSecret;
+    if (secret.len == 0) return error.EmptyJwtSecret;
+    const config: Config = .{
+        .url = url,
+        .secret = secret,
+        .host = env.getPosix("HOST") orelse "127.0.0.1",
+        .port = try std.fmt.parseInt(u16, env.getPosix("PORT") orelse "3000", 10),
+        .clients = try clientCapacity(),
+    };
+    for (1..reactor_count) |index| {
+        const thread = try std.Thread.spawn(.{}, reactorEntry, .{ config, init.gpa, init.io, index });
+        thread.detach();
+    }
+    reactorEntry(config, init.gpa, init.io, 0);
 }
 
 test {

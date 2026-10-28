@@ -17,6 +17,7 @@ pub const Task = struct {
     token: []const u8 = "",
     job: bcrypt.Job = .{},
     needs_hash: bool = false,
+    queued_at: i64 = 0,
     row: ?pg.User = null,
     status: u16 = 503,
     body: ?[]const u8 = null,

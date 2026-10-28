@@ -36,16 +36,19 @@ pub const Pool = struct {
     completed: [capacity]*Job = undefined,
     completed_count: usize = 0,
     outstanding: usize = 0,
+    job_limit: usize = capacity,
     stopping: bool = false,
 
     // The pool's address must remain stable after this call.
-    pub fn start(self: *Pool, io: std.Io) !void {
+    pub fn start(self: *Pool, io: std.Io, workers: usize, jobs: usize) !void {
+        std.debug.assert(workers > 0 and workers <= worker_count and jobs > 0 and jobs <= capacity);
         self.io = io;
+        self.job_limit = jobs;
         if (c.pipe(&self.pipe) < 0) return error.CompletionPipe;
         errdefer self.stop();
         try events.nonblocking(self.pipe[0]);
         try events.nonblocking(self.pipe[1]);
-        for (&self.threads) |*thread| thread.* = try std.Thread.spawn(.{}, work, .{self});
+        for (self.threads[0..workers]) |*thread| thread.* = try std.Thread.spawn(.{}, work, .{self});
     }
 
     pub fn stop(self: *Pool) void {
@@ -62,7 +65,7 @@ pub const Pool = struct {
     pub fn submit(self: *Pool, job: *Job) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.stopping or self.outstanding == capacity) return false;
+        if (self.stopping or self.outstanding == self.job_limit) return false;
         self.pending[self.pending_count] = job;
         self.pending_count += 1;
         self.outstanding += 1;

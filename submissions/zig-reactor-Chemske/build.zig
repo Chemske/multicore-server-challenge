@@ -11,9 +11,17 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     const options = b.addOptions();
+    const reactors = b.option(usize, "reactors", "Independent HTTP reactors (1-4)") orelse 1;
+    if (reactors == 0 or reactors > 4) @panic("reactors must be between 1 and 4");
+    options.addOption(usize, "reactors", reactors);
+    const max_tasks = b.option(usize, "max-tasks", "Total admitted request tasks across all reactors") orelse 2048;
+    if (max_tasks < 64 or max_tasks > 32768 or max_tasks % reactors != 0) @panic("max-tasks must be 64-32768 and divisible by reactors");
+    options.addOption(usize, "max_tasks", max_tasks);
+    options.addOption(bool, "eager_write", b.option(bool, "eager-write", "Attempt response writes immediately") orelse true);
+    options.addOption(bool, "epoll_pause", b.option(bool, "epoll-pause", "Keep paused sockets registered with one-shot zero interest") orelse true);
     options.addOption(bool, "prepared_queries", b.option(bool, "prepared-queries", "Prepare API queries per database connection") orelse true);
     const database_connections = b.option(usize, "db-connections", "Maximum owned PostgreSQL connections (1-95)") orelse 4;
-    if (database_connections == 0 or database_connections > 95) @panic("db-connections must be between 1 and 95");
+    if (database_connections < reactors or database_connections > 95) @panic("db-connections must be between reactors and 95");
     options.addOption(usize, "database_connections", database_connections);
     const clients = b.option(usize, "max-clients", "Maximum HTTP connections") orelse 131072;
     if (clients < 256 or clients > 262144) @panic("max-clients must be between 256 and 262144");
@@ -22,7 +30,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "article_batch", b.option(bool, "article-batch", "Batch already queued single-article reads") orelse true);
     options.addOption(bool, "generic_plans", b.option(bool, "generic-plans", "Reuse generic plans on owned connections") orelse true);
     const bcrypt_workers = b.option(usize, "bcrypt-workers", "Bounded bcrypt workers (1-8)") orelse 4;
-    if (bcrypt_workers == 0 or bcrypt_workers > 8) @panic("bcrypt-workers must be between 1 and 8");
+    if (bcrypt_workers < reactors or bcrypt_workers > 8) @panic("bcrypt-workers must be between reactors and 8");
     options.addOption(usize, "bcrypt_workers", bcrypt_workers);
     const bcrypt_jobs = b.option(usize, "bcrypt-jobs", "Maximum outstanding bcrypt jobs (16-128)") orelse 64;
     if (bcrypt_jobs < 16 or bcrypt_jobs > 128) @panic("bcrypt-jobs must be between 16 and 128");
