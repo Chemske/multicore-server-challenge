@@ -5,7 +5,7 @@ on:
       mode:
         description: Comparison or focused Linux validation
         type: choice
-        options: [comparison, validation, scaling]
+        options: [comparison, validation, scaling, crypto]
         default: comparison
 permissions:
   contents: read
@@ -67,6 +67,7 @@ jobs:
           docker restart "$DB_CONTAINER"
           for attempt in $(seq 60); do pg_isready -h 127.0.0.1 -p 5432 && break; sleep 1; done
       - name: Full unchanged seed and load generator
+        if: inputs.mode != 'crypto'
         run: |
           if [ "${{ inputs.mode }}" != validation ]; then bash seed/make-seed.sh; fi
           bash seed/make-seed.sh --dev
@@ -105,7 +106,7 @@ jobs:
           python3 tests/linux_connections.py
           python3 tests/reactor.py --reactors 2
           python3 tests/milestone5.py
-          python3 tests/recovery.py
+          python3 tests/recovery.py --connections 16
           cp "$CHALLENGE_WORK/build-B/bin/conduit" zig-out/bin/conduit
           python3 tests/page_batch.py
           python3 tests/comment_batch.py
@@ -124,7 +125,7 @@ jobs:
           python3 tests/reactor.py --reactors 2
           python3 tests/linux_connections.py
           python3 tests/milestone5.py
-          python3 tests/recovery.py
+          python3 tests/recovery.py --connections 16
       - name: Compare two and four reactors under higher offered load
         if: inputs.mode == 'scaling'
         run: |
@@ -140,7 +141,14 @@ jobs:
           python3 tests/write_pool.py --writers 4
           python3 tests/reactor.py --reactors 4
           python3 tests/linux_connections.py
-          python3 tests/recovery.py
+          python3 tests/recovery.py --connections 16
+      - name: Independent cost-ten bcrypt comparison
+        if: inputs.mode == 'crypto'
+        run: |
+          set -euo pipefail
+          cd submissions/zig-reactor-Chemske
+          zig build test -Dpg-root="$PGROOT" --summary all
+          zig build password-bench -Doptimize=ReleaseFast 2>&1 | tee "$CHALLENGE_WORK/results/passwords.jsonl"
       - name: Evidence
         if: always()
         uses: actions/upload-artifact@v4
