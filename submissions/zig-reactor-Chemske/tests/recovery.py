@@ -83,6 +83,10 @@ class Proxy:
                     continue
                 backend = socket.create_connection(('127.0.0.1', int(os.environ['PGPORT'])), timeout=3)
                 backend.settimeout(None)
+                # Forward protocol messages immediately; Nagle plus delayed ACKs
+                # must not turn preparation into an artificial startup stall.
+                for peer in (client, backend):
+                    peer.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             except (OSError, socket.timeout):
                 if client is not None:
                     client.close()
