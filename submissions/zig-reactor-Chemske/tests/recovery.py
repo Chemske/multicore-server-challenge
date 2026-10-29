@@ -14,6 +14,7 @@ import struct
 import subprocess
 import threading
 import time
+import uuid
 
 from support import Server, mint, sql, upstream
 
@@ -91,7 +92,7 @@ class Proxy:
                 if client is not None:
                     client.close()
                 continue
-            session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'article_groups': 0, 'article_single': 0, 'comment_groups': 0, 'comment_single': 0, 'page_groups': 0, 'count_groups': 0, 'page_queries': 0, 'count_queries': 0, 'pause': self.pause_new}
+            session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'article_groups': 0, 'article_single': 0, 'comment_groups': 0, 'compact_comment_groups': 0, 'comment_single': 0, 'page_groups': 0, 'count_groups': 0, 'page_queries': 0, 'count_queries': 0, 'pause': self.pause_new}
             self.sessions.append(session)
             self.launch(self.frontend, session)
             self.launch(self.backend, session)
@@ -125,7 +126,9 @@ class Proxy:
                     if name == b'tags': session['tags'] += 1
                     elif name == b'batch_single': session['article_groups'] += 1
                     elif name == b'page_single': session['article_single'] += 1
-                    elif name == b'batch_comments': session['comment_groups'] += 1
+                    elif name in (b'batch_comments', b'batch_comments_compact'):
+                        session['comment_groups'] += 1
+                        if name == b'batch_comments_compact': session['compact_comment_groups'] += 1
                     elif name == b'comments': session['comment_single'] += 1
                     elif name.startswith(b'batch_page_'): session['page_groups'] += 1
                     elif name.startswith(b'batch_count_'): session['count_groups'] += 1
@@ -173,16 +176,17 @@ class Proxy:
 
 @contextmanager
 def lock_tags(server, mode='SHARE', table='tags'):
-    assert mode in ('SHARE', 'ACCESS EXCLUSIVE') and table in ('tags', 'articles', 'users')
+    assert mode in ('SHARE', 'ACCESS EXCLUSIVE') and table in ('tags', 'articles', 'users', 'comments')
+    application = 'recovery-lock-' + uuid.uuid4().hex
     with (results / 'locker.log').open('a') as log:
         process = subprocess.Popen(['psql', '-X', '-v', 'ON_ERROR_STOP=1', '-d', server.database,
                                     '-c', f'BEGIN; LOCK TABLE {table} IN {mode} MODE; SELECT pg_sleep(30); ROLLBACK'],
-                                   env=dict(os.environ, PGAPPNAME='recovery-lock'), stdout=log, stderr=log)
+                                   env=dict(os.environ, PGAPPNAME=application), stdout=log, stderr=log)
         try:
-            eventually(lambda: sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{server.database}' AND application_name='recovery-lock' AND wait_event='PgSleep'") == '1')
+            eventually(lambda: sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{server.database}' AND application_name='{application}' AND wait_event='PgSleep'") == '1')
             yield
         finally:
-            sql(f"SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE datname='{server.database}' AND application_name='recovery-lock'")
+            sql(f"SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE datname='{server.database}' AND application_name='{application}'")
             process.wait(timeout=5)
 
 
@@ -210,7 +214,7 @@ def main():
             eventually(lambda: len(proxy.sessions) >= after)
             eventually(ready)
             idle()
-            eventually(lambda: all(len(s['prepared']) == 43 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
+            eventually(lambda: all(len(s['prepared']) == 44 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
 
         rebuilt(connection_count)
         checks.append('all owners finish session setup and thirty-two named preparations before use')

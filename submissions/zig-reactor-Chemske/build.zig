@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "article_batch", b.option(bool, "article-batch", "Batch already queued single-article reads") orelse true);
     options.addOption(bool, "page_batch", b.option(bool, "page-batch", "Batch queued list pages and subsequent capped counts") orelse true);
     options.addOption(bool, "comments_batch", b.option(bool, "comments-batch", "Batch already queued comment lists") orelse true);
+    options.addOption(bool, "compact_comments", b.option(bool, "compact-comments", "Normalize overlapping comment groups within their statement") orelse false);
     options.addOption(bool, "generic_plans", b.option(bool, "generic-plans", "Reuse generic plans on owned connections") orelse true);
     options.addOption(bool, "feed_prune", b.option(bool, "feed-prune", "Prune feed candidates using a rank proven within the current statement") orelse false);
     const bcrypt_workers = b.option(usize, "bcrypt-workers", "Bounded bcrypt workers (1-8)") orelse 4;

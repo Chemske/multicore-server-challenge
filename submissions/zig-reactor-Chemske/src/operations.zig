@@ -53,7 +53,75 @@ const insert_comment_sql =
     \\ FROM c JOIN users u ON u.id = c.author_id
 ;
 
-pub const Comment = struct { id: i64, body: []const u8, createdAt: []const u8, updatedAt: []const u8, author: profiles.Profile };
+pub const Comment = struct {
+    id: i64,
+    body: []const u8,
+    createdAt: []const u8,
+    updatedAt: []const u8,
+    author: profiles.Profile,
+    encoded: ?struct { bytes: []const u8, flag_offset: usize } = null,
+
+    pub fn jsonStringify(self: Comment, writer: *std.json.Stringify) !void {
+        if (self.encoded) |shared| {
+            try writer.beginWriteRaw();
+            try writer.writer.writeAll(shared.bytes[0..shared.flag_offset]);
+            try writer.writer.writeAll(if (self.author.following) "true" else "false");
+            try writer.writer.writeAll(shared.bytes[shared.flag_offset + 5 ..]);
+            writer.endWriteRaw();
+            return;
+        }
+        try writer.beginObject();
+        inline for (.{ "id", "body", "createdAt", "updatedAt", "author" }) |key| {
+            try writer.objectField(key);
+            try writer.write(@field(self, key));
+        }
+        try writer.endObject();
+    }
+
+    // The complete standard-encoded object and its flag offset belong to the
+    // primary task's arena. Followers finish before that arena is released.
+    pub fn encodeForGroup(self: *Comment, allocator: std.mem.Allocator) !void {
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        var writer: std.json.Stringify = .{ .writer = &output.writer };
+        try writer.beginObject();
+        inline for (.{ "id", "body", "createdAt", "updatedAt" }) |key| {
+            try writer.objectField(key);
+            try writer.write(@field(self, key));
+        }
+        try writer.objectField("author");
+        try writer.beginObject();
+        inline for (.{ "username", "bio", "image" }) |key| {
+            try writer.objectField(key);
+            try writer.write(@field(self.author, key));
+        }
+        try writer.objectField("following");
+        try writer.beginWriteRaw();
+        const offset = output.written().len;
+        try output.writer.writeAll("false");
+        writer.endWriteRaw();
+        try writer.endObject();
+        try writer.endObject();
+        self.encoded = .{ .bytes = try output.toOwnedSlice(), .flag_offset = offset };
+    }
+};
+
+test "group comment encoding retains escaping, nulls and each recipient flag" {
+    const allocator = std.testing.allocator;
+    var comment: Comment = .{ .id = 42, .body = "quotes \" slash \\ newline\n é", .createdAt = "2030-01-01T00:00:00.000Z", .updatedAt = "2030-01-01T00:00:00.001Z", .author = .{ .username = "user-é", .bio = null, .image = "image\"\\", .following = false } };
+    try comment.encodeForGroup(allocator);
+    defer allocator.free(comment.encoded.?.bytes);
+    inline for (.{ false, true }) |following| {
+        comment.author.following = following;
+        var plain = comment;
+        plain.encoded = null;
+        const expected = try std.json.Stringify.valueAlloc(allocator, plain, .{});
+        defer allocator.free(expected);
+        const actual = try std.json.Stringify.valueAlloc(allocator, comment, .{});
+        defer allocator.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+}
 pub const Query = struct {
     statement: [:0]const u8,
     prepared_name: ?[:0]const u8 = null,
