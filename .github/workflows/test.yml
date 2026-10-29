@@ -116,11 +116,12 @@ jobs:
           sudo prlimit --pid $$ --nofile=200000:200000
           ulimit -n 200000
           cd submissions/zig-reactor-Chemske
-          zig build test -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=16 -Dwrite-connections=4 -Dread-batch-size=128 -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=75 --summary all
-          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=1 -Ddb-connections=4 -Dread-batch-size=128
+          zig build test -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=16 -Dwrite-connections=4 -Dread-batch-size=128 -Dfeed-prune=true -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=75 --summary all
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=1 -Ddb-connections=4 -Dread-batch-size=128 -Dfeed-prune=true
+          python3 tests/feed_prune.py
           python3 tests/page_batch.py
           python3 tests/comment_batch.py
-          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=16 -Dwrite-connections=4 -Dread-batch-size=128 -Dmax-tasks=8192 -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=75
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=16 -Dwrite-connections=4 -Dread-batch-size=128 -Dfeed-prune=true -Dmax-tasks=8192 -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=75
           python3 tests/password_batch.py
           python3 tests/write_pool.py --writers 4
           python3 tests/reactor.py --reactors 2
