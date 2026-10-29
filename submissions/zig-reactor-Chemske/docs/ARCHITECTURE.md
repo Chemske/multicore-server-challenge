@@ -24,7 +24,7 @@ Picohttpparser parses headers; my layer owns framing, Content-Length/Transfer-En
 
 ## SQL and read groups
 
-Forty-four fixed queries are prepared separately on each connection, including eleven mutation/lookup statements and an optional compact comment representation. The mutation state machine retains one parameterized command at a time; BEGIN, COMMIT and ROLLBACK keep their existing protocol and transaction boundaries. Setup fully drains each session command and preparation before admitting the connection. Replacements rebuild this state. Session-only plan/JIT choices and their comparison controls are described in PERFORMANCE.md; no role, database or server-wide tuning is applied.
+Forty-seven fixed queries are prepared separately on each connection, including eleven mutation/lookup statements and an optional compact comment representation and three grouped favorite statements. The mutation state machine retains one parameterized command at a time; BEGIN, COMMIT and ROLLBACK keep their existing protocol and transaction boundaries. Setup fully drains each session command and preparation before admitting the connection. Replacements rebuild this state. Session-only plan/JIT choices and their comparison controls are described in PERFORMANCE.md; no role, database or server-wide tuning is applied.
 
 Article lists select page IDs in descending order before enrichment, then issue a separate capped count. This retains the reference's page-then-count statement snapshots. Counts stop at 1,000 without hiding accessible pages beyond that offset. Filter precedence, nullable fields, viewer flags and UTC millisecond formatting are explicit. Every request reads current data from PostgreSQL.
 

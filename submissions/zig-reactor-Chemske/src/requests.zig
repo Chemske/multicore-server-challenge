@@ -18,6 +18,7 @@ pub const Task = struct {
     job: bcrypt.Job = .{},
     needs_hash: bool = false,
     queued_at: i64 = 0,
+    skip_write_batch: bool = false,
     row: ?pg.User = null,
     status: u16 = 503,
     body: ?[]const u8 = null,
