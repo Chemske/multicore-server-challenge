@@ -1,5 +1,11 @@
 # Submission validation
 
+## Scaling revision — 29 October 2026
+
+The integrated Linux revision passed [run 40961667314](https://github.com/Chemske/multicore-server-challenge/actions/runs/40961667314): 22 unit checks, grouped page/comment faults, mixed bcrypt jobs with Go cross-verification, dedicated-writer isolation, two serving reactors, 150,000 actual HTTP sockets, 15 mutation cases and nine recovery cases. Zig and Go each passed the unchanged 197-step development-seed suite; the suite passed again after database recovery. The larger socket check is separate from workload capacity. Configuration, scope and evidence are recorded in [SCALING.md](SCALING.md).
+
+## Initial submission — 25 October 2026
+
 Checked on 25 October 2026. All commands below use the submitted source and unchanged upstream schema, seeds, test suite and reference implementation. Local helper/proxy tests use disposable database copies.
 
 ## Correctness and failure handling

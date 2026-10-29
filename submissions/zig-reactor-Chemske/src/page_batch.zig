@@ -18,7 +18,7 @@ fn ids(comptime family: articles.Family) []const u8 {
         .tag => "SELECT at.article_id AS id FROM article_tags at WHERE at.tag_id=(SELECT id FROM tags WHERE name=k.key) ORDER BY at.article_id DESC LIMIT 100 OFFSET k.off",
         .author => "SELECT p.id FROM articles p WHERE p.author_id=(SELECT id FROM users WHERE username=k.key) ORDER BY p.id DESC LIMIT 100 OFFSET k.off",
         .favorited => "SELECT f.article_id AS id FROM favorites f WHERE f.user_id=(SELECT id FROM users WHERE username=k.key) ORDER BY f.article_id DESC LIMIT 100 OFFSET k.off",
-        .feed => "SELECT x.id FROM follows fo CROSS JOIN LATERAL (SELECT a2.id FROM articles a2 WHERE a2.author_id=fo.followee_id ORDER BY a2.id DESC LIMIT LEAST(k.lim::numeric+k.off::numeric,9223372036854775807)::bigint) x WHERE fo.follower_id=k.key::bigint ORDER BY x.id DESC LIMIT 100 OFFSET k.off",
+        .feed => articles.feedIds("k.key::bigint", "k.lim", "k.off", "100"),
         .single => unreachable,
     };
     // The constant inner bound also gives generic plans a realistic page size.

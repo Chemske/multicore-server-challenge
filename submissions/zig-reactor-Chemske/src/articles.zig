@@ -16,6 +16,21 @@ const from = " FROM articles a JOIN users u ON u.id = a.author_id ";
 const select = fields ++ from;
 pub const by_id = fields ++ ", a.body" ++ from ++ " WHERE a.id = $2";
 pub const Family = enum { all, tag, author, favorited, feed, single };
+
+// An author's depth-th row proves that older rows cannot enter the combined
+// first depth rows. This bound is derived afresh in the same page statement.
+pub fn feedIds(comptime viewer: []const u8, comptime limit: []const u8, comptime offset: []const u8, comptime cap: []const u8) []const u8 {
+    const depth = "LEAST((" ++ limit ++ ")::numeric+(" ++ offset ++ ")::numeric,9223372036854775807)::bigint";
+    if (!@import("build_options").feed_prune)
+        return "SELECT x.id FROM follows fo CROSS JOIN LATERAL (SELECT a2.id FROM articles a2 WHERE a2.author_id=fo.followee_id ORDER BY a2.id DESC LIMIT " ++ depth ++ ") x WHERE fo.follower_id=" ++ viewer ++ " ORDER BY x.id DESC LIMIT " ++ cap ++ " OFFSET " ++ offset;
+    return "WITH followed AS MATERIALIZED (SELECT followee_id FROM follows WHERE follower_id=" ++ viewer ++ " ORDER BY followee_id), " ++
+        "rank_bound AS MATERIALIZED (SELECT ranked.id FROM (SELECT followee_id FROM followed WHERE " ++ depth ++ "<=256 LIMIT 8) fo CROSS JOIN LATERAL " ++
+        "(SELECT a.id FROM articles a WHERE a.author_id=fo.followee_id ORDER BY a.id DESC LIMIT 1 OFFSET GREATEST(" ++ depth ++ ",1)-1) ranked LIMIT 1) " ++
+        "SELECT x.id FROM followed fo CROSS JOIN LATERAL " ++
+        "(SELECT a2.id FROM articles a2 WHERE a2.author_id=fo.followee_id AND a2.id>=COALESCE((SELECT id FROM rank_bound),'-9223372036854775808'::bigint) " ++
+        "ORDER BY a2.id DESC LIMIT " ++ depth ++ ") x ORDER BY x.id DESC LIMIT " ++ cap ++ " OFFSET " ++ offset;
+}
+
 pub const Read = struct {
     family: Family,
     phase: enum { page, count } = .page,
@@ -37,7 +52,7 @@ pub const Read = struct {
             .author => select ++ " WHERE a.id IN (SELECT p.id FROM articles p WHERE p.author_id = (SELECT id FROM users WHERE username = $4) ORDER BY p.id DESC LIMIT $2::bigint OFFSET $3::bigint) ORDER BY a.id DESC",
             .favorited => select ++ " WHERE a.id IN (SELECT f.article_id FROM favorites f WHERE f.user_id = (SELECT id FROM users WHERE username = $4) ORDER BY f.article_id DESC LIMIT $2::bigint OFFSET $3::bigint) ORDER BY a.id DESC",
             // Numeric addition avoids both the reference's int32 overflow and int64 wraparound.
-            .feed => select ++ " WHERE a.id IN (SELECT x.id FROM follows fo CROSS JOIN LATERAL (SELECT a2.id FROM articles a2 WHERE a2.author_id = fo.followee_id ORDER BY a2.id DESC LIMIT LEAST($2::numeric + $3::numeric, 9223372036854775807)::bigint) x WHERE fo.follower_id = $1 ORDER BY x.id DESC LIMIT $2::bigint OFFSET $3::bigint) ORDER BY a.id DESC",
+            .feed => select ++ " WHERE a.id IN (" ++ (comptime feedIds("$1", "$2", "$3", "$2::bigint")) ++ ") ORDER BY a.id DESC",
             .single => fields ++ ", a.body" ++ from ++ " WHERE a.slug = $2",
         };
     }

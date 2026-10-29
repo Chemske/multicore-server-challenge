@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "page_batch", b.option(bool, "page-batch", "Batch queued list pages and subsequent capped counts") orelse true);
     options.addOption(bool, "comments_batch", b.option(bool, "comments-batch", "Batch already queued comment lists") orelse true);
     options.addOption(bool, "generic_plans", b.option(bool, "generic-plans", "Reuse generic plans on owned connections") orelse true);
+    options.addOption(bool, "feed_prune", b.option(bool, "feed-prune", "Prune feed candidates using a rank proven within the current statement") orelse false);
     const bcrypt_workers = b.option(usize, "bcrypt-workers", "Bounded bcrypt workers (1-8)") orelse 4;
     if (bcrypt_workers < reactors or bcrypt_workers > 8) @panic("bcrypt-workers must be between reactors and 8");
     options.addOption(usize, "bcrypt_workers", bcrypt_workers);
