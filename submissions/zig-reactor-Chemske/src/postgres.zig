@@ -144,6 +144,9 @@ fn statementName(route: http.Route, read: ?articles.Read) [:0]const u8 {
 
 fn prepareItem(index: usize) ?struct { name: [:0]const u8, sql: [:0]const u8 } {
     if (index == 32 + operations.prepared.len) return .{ .name = "batch_comments_compact", .sql = read_batch.compact_comments_sql };
+    if (index == 33 + operations.prepared.len) return .{ .name = "batch_favorite", .sql = read_batch.favorite_sql };
+    if (index == 34 + operations.prepared.len) return .{ .name = "batch_unfavorite", .sql = read_batch.unfavorite_sql };
+    if (index == 35 + operations.prepared.len) return .{ .name = "batch_by_id", .sql = read_batch.by_id_sql };
     if (index >= 32) {
         const operation_index = index - 32;
         if (operation_index >= operations.prepared.len) return null;
@@ -340,6 +343,33 @@ pub fn sendReadBatch(conn: *Conn, inputs: []const read_batch.Input, allocator: s
         const values = [_]?[*:0]const u8{ params[0].ptr, params[1].ptr };
         if (PQsendQueryPrepared(conn, if (compact) "batch_comments_compact" else if (comments) "batch_comments" else "batch_single", 2, &values, null, null, 0) != 1) return error.DatabaseQuery;
     } else try send(conn, if (compact) read_batch.compact_comments_sql else if (comments) read_batch.comments_sql else read_batch.single_sql, &.{ params[0], params[1] });
+}
+
+pub fn sendFavoriteGroup(conn: *Conn, inputs: []const read_batch.Input, allocator: std.mem.Allocator, remove: bool, reading: bool) !void {
+    const params = try read_batch.parameters(allocator, inputs);
+    const name: [:0]const u8 = if (reading) "batch_by_id" else if (remove) "batch_unfavorite" else "batch_favorite";
+    const statement = if (reading) read_batch.by_id_sql else if (remove) read_batch.unfavorite_sql else read_batch.favorite_sql;
+    if (prepared_queries) {
+        const values = [_]?[*:0]const u8{ params[0].ptr, params[1].ptr };
+        if (PQsendQueryPrepared(conn, name.ptr, 2, &values, null, null, 0) != 1) return error.DatabaseQuery;
+    } else try send(conn, statement, &.{ params[0], params[1] });
+}
+
+pub fn confirmedStatementFailure(result: *Result) bool {
+    if (PQresultStatus(result) != 7) return false;
+    const code = PQresultErrorField(result, 'C') orelse return false;
+    const value = std.mem.span(code);
+    return value.len == 5 and !std.mem.startsWith(u8, value, "08") and !std.mem.startsWith(u8, value, "57P");
+}
+
+pub fn favoriteTarget(result: *Result, index: usize, expected: usize, allocator: std.mem.Allocator) !?[:0]const u8 {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != 2 or PQntuples(result) != expected) return error.DatabaseResult;
+    const ordinal = std.fmt.parseInt(usize, try required(result, @intCast(index), 0), 10) catch return error.DatabaseResult;
+    if (ordinal != index + 1) return error.DatabaseResult;
+    const value = cell(result, @intCast(index), 1) orelse return null;
+    const id = std.fmt.parseInt(i64, value, 10) catch return error.DatabaseResult;
+    if (id <= 0) return error.DatabaseResult;
+    return try allocator.dupeSentinel(u8, value, 0);
 }
 
 pub fn readBatchBounds(result: *Result, expected: usize, columns: c_int, bounds: *[read_batch.capacity + 1]usize) !void {

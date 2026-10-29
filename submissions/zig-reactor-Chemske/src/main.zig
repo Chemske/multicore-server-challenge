@@ -32,7 +32,8 @@ const Database = struct {
     fd: c_int = -1,
     followers: [read_batch.capacity - 1]?*requests.Task = @splat(null),
     follower_count: usize = 0,
-    read_group: enum { none, article, comments, compact_comments, pages } = .none,
+    read_group: enum { none, article, comments, compact_comments, pages, favorite_write, favorite_read } = .none,
+    batch_failure: enum { none, rolled_back, unusable } = .none,
 };
 const State = enum { closed, reading, queued, database, hashing, writing };
 const Client = struct {
@@ -70,6 +71,8 @@ const Server = struct {
     database_failures: u64 = 0,
     responses_503: u64 = 0,
     compact_comment_batches: u64 = 0,
+    favorite_batches: u64 = 0,
+    favorite_fallbacks: u64 = 0,
     queued_dispatches: u64 = 0,
     queue_wait_ms: u64 = 0,
     max_queue_wait_ms: u64 = 0,
@@ -433,12 +436,75 @@ const Server = struct {
         try pg.sendPageBatch(database.connection.?, inputs[0 .. database.follower_count + 1], primary.arena.allocator(), primary.read.?.family, primary.read.?.phase == .count);
     }
 
+    fn sendFavoriteGroup(database: *Database, reading: bool) !void {
+        const primary = database.active.?;
+        var inputs: [read_batch.capacity]read_batch.Input = undefined;
+        const count = database.follower_count + 1;
+        for (0..count) |index| {
+            const task = if (index == 0) primary else database.followers[index - 1].?;
+            inputs[index] = .{ .viewer = task.params[0].?, .slug = if (reading) task.operation.?.id orelse "0" else task.params[1].? };
+        }
+        try pg.sendFavoriteGroup(database.connection.?, inputs[0..count], primary.arena.allocator(), primary.route == .unfavorite, reading);
+    }
+
+    fn fallbackFavoriteGroup(self: *Server, database: *Database) void {
+        var members: [read_batch.capacity]*requests.Task = undefined;
+        members[0] = database.active.?;
+        for (database.followers[0..database.follower_count], 1..) |task, index| members[index] = task.?;
+        const count = database.follower_count + 1;
+        database.active = null;
+        database.follower_count = 0;
+        database.read_group = .none;
+        database.batch_failure = .none;
+        self.favorite_fallbacks += 1;
+        for (members[0..count]) |task| {
+            if (!self.isLive(task)) {
+                self.releaseTask(task);
+                continue;
+            }
+            task.skip_write_batch = true;
+            task.status = 503;
+            self.clients[task.recipient.index].state = .queued;
+            if (write_connections > 0) self.scheduler.enqueueWrite(task.recipient.index) else self.scheduler.enqueue(task.recipient.index);
+        }
+    }
+
     fn readGroupResult(self: *Server, database: *Database, result: *pg.Result) void {
         _ = self;
         var members: [read_batch.capacity]*requests.Task = undefined;
         members[0] = database.active.?;
         for (database.followers[0..database.follower_count], 1..) |task, index| members[index] = task.?;
         const group = members[0 .. database.follower_count + 1];
+        if (database.read_group == .favorite_write) {
+            if (pg.status(result) != 200) {
+                database.batch_failure = if (pg.confirmedStatementFailure(result)) .rolled_back else .unusable;
+                for (group) |task| task.status = 503;
+                return;
+            }
+            for (group, 0..) |task, index| {
+                task.operation.?.id = pg.favoriteTarget(result, index, group.len, task.arena.allocator()) catch {
+                    database.batch_failure = .unusable;
+                    return;
+                };
+                task.status = if (task.operation.?.id == null) 404 else 200;
+            }
+            return;
+        }
+        if (database.read_group == .favorite_read) {
+            pg.checkSingleBatch(result, group.len) catch {
+                for (group) |task| task.status = 503;
+                return;
+            };
+            for (group, 0..) |task, index| {
+                if (task.status != 200) continue;
+                task.operation.?.article = pg.singleBatchRow(result, index, task.arena.allocator()) catch {
+                    task.status = 503;
+                    continue;
+                };
+                if (task.operation.?.article.len == 0) task.status = 404;
+            }
+            return;
+        }
         if (database.read_group == .pages) {
             const count = group[0].read.?.phase == .count;
             var bounds: [read_batch.capacity + 1]usize = undefined;
@@ -575,6 +641,30 @@ const Server = struct {
             const result = pg.PQgetResult(connection) orelse {
                 // The statement is fully drained, including its transaction completion.
                 if (database.read_group != .none) {
+                    if (database.read_group == .favorite_write) {
+                        // ReadyForQuery must confirm the implicit transaction
+                        // ended before either reading back or retrying a rollback.
+                        if (pg.PQtransactionStatus(connection) != 0 or database.batch_failure == .unusable) {
+                            self.databaseFailed(index);
+                            return;
+                        }
+                        if (database.batch_failure == .rolled_back) {
+                            self.fallbackFavoriteGroup(database);
+                            return;
+                        }
+                        var needs_read = task.status == 200 and self.isLive(task);
+                        for (database.followers[0..database.follower_count]) |other| needs_read = needs_read or (other.?.status == 200 and self.isLive(other.?));
+                        if (needs_read) {
+                            database.read_group = .favorite_read;
+                            database.active_since = self.now();
+                            sendFavoriteGroup(database, true) catch {
+                                self.databaseFailed(index);
+                                return;
+                            };
+                            try self.databaseReady(index, false);
+                            return;
+                        }
+                    }
                     if (database.read_group == .pages and task.read.?.phase == .page) {
                         var needs_count = task.status == 200 and self.isLive(task);
                         task.read.?.phase = .count;
@@ -752,6 +842,35 @@ const Server = struct {
             self.clients[index].state = .database;
             database.active = task;
             database.active_since = self.now();
+            if (@import("build_options").favorite_batch and !task.skip_write_batch and (task.route == .favorite or task.route == .unfavorite)) {
+                var next = if (write_connections > 0) self.scheduler.write_head else self.scheduler.head;
+                var bytes = task.params[0].?.len + task.params[1].?.len;
+                for (0..read_batch.lookahead) |_| {
+                    if (next == scheduling.none or database.follower_count == database.followers.len) break;
+                    const candidate = next;
+                    next = self.scheduler.nodes[candidate].next;
+                    const other = &self.clients[candidate];
+                    if (other.task.?.route != task.route or other.task.?.skip_write_batch) continue;
+                    const size = other.task.?.params[0].?.len + other.task.?.params[1].?.len;
+                    if (bytes + size > read_batch.max_parameter_bytes) break;
+                    bytes += size;
+                    self.scheduler.unqueue(candidate);
+                    other.state = .database;
+                    database.followers[database.follower_count] = other.task;
+                    database.follower_count += 1;
+                }
+                if (database.follower_count != 0) {
+                    database.read_group = .favorite_write;
+                    database.batch_failure = .none;
+                    self.favorite_batches += 1;
+                    sendFavoriteGroup(database, false) catch {
+                        self.databaseFailed(slot);
+                        continue;
+                    };
+                    try self.databaseReady(slot, false);
+                    continue;
+                }
+            }
             if (@import("build_options").page_batch and task.read != null and task.read.?.family != .single) {
                 var next = self.scheduler.head;
                 const first = pageInput(task);
@@ -885,6 +1004,7 @@ const Server = struct {
             if (current >= self.next_stats) {
                 const password_stats = self.pool.stats();
                 std.log.info("comment_stats id={d} compact_batches={d}", .{ self.reactor_id, self.compact_comment_batches });
+                std.log.info("favorite_stats id={d} batches={d} fallbacks={d}", .{ self.reactor_id, self.favorite_batches, self.favorite_fallbacks });
                 std.log.info("password_stats id={d} outstanding={d} batches_1={d} batches_2={d} batches_3={d} batches_4={d}", .{ self.reactor_id, password_stats.outstanding, password_stats.batches[0], password_stats.batches[1], password_stats.batches[2], password_stats.batches[3] });
                 self.next_stats = current + 10_000;
                 std.log.info("reactor_stats id={d} admitted={d} active={d} peak={d} capacity_503={d} password_503={d} db_failures={d} responses_503={d} dispatches={d} queue_wait_ms={d} queue_max_ms={d} input_bytes={d} output_bytes={d}", .{ self.reactor_id, self.admitted, self.task_count, self.peak_tasks, self.capacity_rejections, self.password_rejections, self.database_failures, self.responses_503, self.queued_dispatches, self.queue_wait_ms, self.max_queue_wait_ms, self.input_bytes, self.output_bytes });

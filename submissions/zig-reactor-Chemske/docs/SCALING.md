@@ -43,7 +43,7 @@ A count-boundary test pauses the second SQL statement, inserts a new article ext
 
 `tests/linux_connections.py` checks 150,000 retained sockets and an HTTP response on each, followed by database reads on reused sockets. It uses several loopback source addresses to avoid the per-destination ephemeral-port ceiling. It does not claim 150,000 workload users. The test changes no kernel settings; the CI helper raises only its own descriptor limit to match the benchmark service.
 
-Build-time controls live in `build.zig`: `reactors`, `db-connections`, `write-connections`, `max-tasks`, `max-clients`, `read-batch-size`, `bcrypt-workers`, `bcrypt-jobs`, `bcrypt-lanes`, `bcrypt-gather-ms`, `feed-prune`, `page-batch`, `comments-batch`, `compact-comments`, `article-batch`, `tag-batch`, `generic-plans`, `prepared-queries`, `eager-write` and `epoll-pause`. Runtime configuration remains exactly the four variables in the challenge contract.
+Build-time controls live in `build.zig`: `reactors`, `db-connections`, `write-connections`, `max-tasks`, `max-clients`, `read-batch-size`, `bcrypt-workers`, `bcrypt-jobs`, `bcrypt-lanes`, `bcrypt-gather-ms`, `feed-prune`, `page-batch`, `comments-batch`, `compact-comments`, `favorite-batch`, `article-batch`, `tag-batch`, `generic-plans`, `prepared-queries`, `eager-write` and `epoll-pause`. Runtime configuration remains exactly the four variables in the challenge contract.
 
 `benchmarks/linux_compare.py` preserves raw results, endpoint histograms, workload mix, error counts, generator-limit flags, executable fingerprints and diagnostics. Each run uses a fresh full-seed clone and removes its temporary server/database even on failure. CI-only workflow changes stay on the fork's separate diagnostic branch, outside the submission pull request.
 
@@ -71,7 +71,7 @@ The first separate-generator 100,000-user diagnostic did not show an end-to-end 
 
 ## Prepared mutation statements
 
-The read catalog already retained prepared plans. Eleven mutation and follow-up lookup statements now use the same lifetime, instead of being parsed and planned again after each write. Their SQL, parameter ownership and transaction sequencing are unchanged. BEGIN, COMMIT and ROLLBACK retain their existing execution path. Recovery requires all 44 statements to be rebuilt before reusing a replacement connection. Native verification passed all 197 unchanged steps, the 15 write cases and nine failure/concurrency cases, including a lost COMMIT acknowledgement without replay.
+The read catalog already retained prepared plans. Eleven mutation and follow-up lookup statements now use the same lifetime, instead of being parsed and planned again after each write. Their SQL, parameter ownership and transaction sequencing are unchanged. BEGIN, COMMIT and ROLLBACK retain their existing execution path. Recovery requires all 47 statements to be rebuilt before reusing a replacement connection. Native verification passed all 197 unchanged steps, the 15 write cases and nine failure/concurrency cases, including a lost COMMIT acknowledgement without replay.
 
 ## Compact comment groups
 
@@ -80,3 +80,11 @@ The optional compact representation is selected only when at least half of a cap
 The primary task owns the metadata and its standard-encoded JSON. A recorded boolean offset allows each recipient's following flag to be emitted without re-encoding the shared strings. No raw user string enters JSON without standard escaping, and no internal encoding field is exposed by the API. Every follower is serialized before the primary arena is released. Nothing survives the group, and no later request can join it.
 
 Native checks passed 24 unit tests, the mixed comment/freshness/SQL-error cases, 197 unchanged steps and the Go comparison. A targeted test disconnects the primary socket after the group reaches PostgreSQL while other recipients remain active, then verifies every surviving response. This is still an experimental control until a separate-generator measurement shows a useful gain.
+
+## Grouped favorite mutations
+
+The optional `favorite-batch` control combines already queued favorite requests of the same kind. One parameterized, implicit transaction applies distinct mutations, then its ReadyForQuery must confirm an idle connection before a separate fresh article read. Missing targets remain individual 404s. No recipient receives success before commit.
+
+A confirmed SQL failure and completed rollback allow that closed group to fall back to independent operations, preserving each original deadline and disabling further grouping for those tasks. Connection loss, malformed results or an uncertain transaction outcome fail the affected requests without replay. Follow-up reads use article IDs, so a concurrent slug rename does not redirect them.
+
+`tests/favorite_batch.py` requires actual grouped wire executions, checks repeated and missing targets, mixes a foreign-key failure with valid requests, and drops the implicit commit acknowledgement after PostgreSQL has committed. It verifies durable rows and no individual replay, then waits for the write owner to recover. Native runs passed with both shared and dedicated write pools. This remains disabled until a workload comparison supports enabling it.

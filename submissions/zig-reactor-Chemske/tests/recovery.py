@@ -57,6 +57,8 @@ class Proxy:
         self.release_new.set()
         self.drop_commit = threading.Event()
         self.commit_dropped = threading.Event()
+        self.drop_favorite = threading.Event()
+        self.favorite_dropped = threading.Event()
         self.sessions = []
         self.hold_counts = False
         self.count_seen = threading.Event()
@@ -93,6 +95,7 @@ class Proxy:
                     client.close()
                 continue
             session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'article_groups': 0, 'article_single': 0, 'comment_groups': 0, 'compact_comment_groups': 0, 'comment_single': 0, 'page_groups': 0, 'count_groups': 0, 'page_queries': 0, 'count_queries': 0, 'pause': self.pause_new}
+            session.update(favorite_groups=0, favorite_single=0, favorite_pending=False)
             self.sessions.append(session)
             self.launch(self.frontend, session)
             self.launch(self.backend, session)
@@ -123,6 +126,11 @@ class Proxy:
                         session['tuning'].add(statement.split(b'\0', 1)[0])
                 elif header[:1] == b'B':
                     name = body.split(b'\0', 2)[1]
+                    if name in (b'batch_favorite', b'batch_unfavorite'):
+                        session['favorite_groups'] += 1
+                        session['favorite_pending'] = True
+                    elif name in (b'op_favorite', b'op_unfavorite'):
+                        session['favorite_single'] += 1
                     if name == b'tags': session['tags'] += 1
                     elif name == b'batch_single': session['article_groups'] += 1
                     elif name == b'page_single': session['article_single'] += 1
@@ -157,6 +165,12 @@ class Proxy:
                     self.drop_commit.clear()
                     self.commit_dropped.set()
                     return  # PostgreSQL committed, but libpq receives no acknowledgement.
+                if header[:1] == b'Z' and session['favorite_pending']:
+                    session['favorite_pending'] = False
+                    if self.drop_favorite.is_set():
+                        self.drop_favorite.clear()
+                        self.favorite_dropped.set()
+                        return  # Drop the implicit commit's ReadyForQuery, never replay it.
                 client.sendall(header + body)
         except (OSError, EOFError):
             pass
@@ -214,10 +228,10 @@ def main():
             eventually(lambda: len(proxy.sessions) >= after)
             eventually(ready)
             idle()
-            eventually(lambda: all(len(s['prepared']) == 44 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
+            eventually(lambda: all(len(s['prepared']) == 47 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
 
         rebuilt(connection_count)
-        checks.append('all owners finish session setup and thirty-two named preparations before use')
+        checks.append('all owners finish session setup and forty-seven named preparations before use')
         accepted = len(proxy.sessions)
         kill(one=True)
         rebuilt(accepted + 1)

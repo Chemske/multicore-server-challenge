@@ -5,6 +5,26 @@ pub const capacity = @import("build_options").read_batch_size;
 pub const lookahead = @max(64, capacity * 4);
 pub const max_parameter_bytes = 256 * 1024;
 
+pub const favorite_sql = "WITH requested AS MATERIALIZED (SELECT * FROM unnest($1::bigint[],$2::text[]) WITH ORDINALITY r(viewer,slug,ordinal)), targets AS MATERIALIZED (SELECT r.ordinal,r.viewer,a.id FROM requested r LEFT JOIN articles a ON a.slug=r.slug), changed AS (INSERT INTO favorites(user_id,article_id) SELECT DISTINCT viewer,id FROM targets WHERE id IS NOT NULL ON CONFLICT DO NOTHING RETURNING article_id) SELECT t.ordinal,t.id FROM targets t CROSS JOIN (SELECT count(*) FROM changed) applied ORDER BY t.ordinal";
+pub const unfavorite_sql = "WITH requested AS MATERIALIZED (SELECT * FROM unnest($1::bigint[],$2::text[]) WITH ORDINALITY r(viewer,slug,ordinal)), targets AS MATERIALIZED (SELECT r.ordinal,r.viewer,a.id FROM requested r LEFT JOIN articles a ON a.slug=r.slug), changed AS (DELETE FROM favorites f USING targets t WHERE f.user_id=t.viewer AND f.article_id=t.id RETURNING f.article_id) SELECT t.ordinal,t.id FROM targets t CROSS JOIN (SELECT count(*) FROM changed) applied ORDER BY t.ordinal";
+
+pub const by_id_sql =
+    \\WITH requested AS MATERIALIZED (
+    \\ SELECT * FROM unnest($1::bigint[],$2::bigint[]) WITH ORDINALITY r(viewer,id,ordinal)
+    \\), selected AS MATERIALIZED (
+    \\ SELECT a.id,a.slug,a.title,a.description,a.body,a.author_id,
+    \\ to_char(a.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+    \\ to_char(a.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+    \\ ARRAY(SELECT t.name FROM article_tags at JOIN tags t ON t.id=at.tag_id WHERE at.article_id=a.id ORDER BY t.name) AS tags,
+    \\ (SELECT count(*) FROM favorites f WHERE f.article_id=a.id) AS favorites,
+    \\ u.username,u.bio,u.image FROM articles a JOIN users u ON u.id=a.author_id
+    \\ JOIN (SELECT DISTINCT id FROM requested) wanted ON wanted.id=a.id
+    \\) SELECT r.ordinal,a.slug,a.title,a.description,a.created_at,a.updated_at,a.tags,a.favorites,
+    \\ EXISTS(SELECT 1 FROM favorites f WHERE f.article_id=a.id AND f.user_id=r.viewer),a.username,a.bio,a.image,
+    \\ EXISTS(SELECT 1 FROM follows fo WHERE fo.follower_id=r.viewer AND fo.followee_id=a.author_id),a.body
+    \\ FROM requested r LEFT JOIN selected a ON a.id=r.id ORDER BY r.ordinal
+;
+
 // Only requests captured before dispatch share this statement snapshot. Article
 // metadata is computed once per distinct slug; viewer flags remain per request.
 pub const single_sql =
