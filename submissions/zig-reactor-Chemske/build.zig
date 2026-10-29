@@ -68,4 +68,10 @@ pub fn build(b: *std.Build) void {
     password_bench_module.addImport("bcrypt_lanes", password_module);
     const password_bench = b.addExecutable(.{ .name = "password-bench", .root_module = password_bench_module });
     b.step("password-bench", "Compare scalar and independent bcrypt lanes at cost ten").dependOn(&b.addRunArtifact(password_bench).step);
+    const catalog = b.createModule(.{ .root_source_file = b.path("src/query_catalog.zig"), .target = target, .optimize = optimize });
+    catalog.addOptions("build_options", options);
+    const queries = b.createModule(.{ .root_source_file = b.path("benchmarks/queries.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    queries.addImport("query_catalog", catalog);
+    const query_dump = b.addExecutable(.{ .name = "query-dump", .root_module = queries });
+    b.step("dump-queries", "Print exact prepared read templates for independent query-plan diagnostics").dependOn(&b.addRunArtifact(query_dump).step);
 }

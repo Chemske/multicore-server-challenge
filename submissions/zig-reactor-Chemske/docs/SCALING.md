@@ -65,4 +65,10 @@ A bounded rank lookup can reduce the number of followed-author articles merged f
 
 The optional `feed-prune` control probes at most eight followed authors and at most 256 ranks. Without a usable bound, including deeper pages, the query retains the ordinary merge. The fallback is the minimum signed article ID, so correctness does not depend on positive IDs. No bound survives the statement. Both individual and grouped feeds use the same SQL generator.
 
+The first separate-generator 100,000-user diagnostic did not show an end-to-end improvement from this control: both variants failed, with approximately 22–23% errors. It remains disabled. Correctness alone is not evidence of a useful performance change.
+
 `tests/feed_prune.py` compares 62 API results with the independent full feed relation. Cases include empty/sparse follow sets, early authors without enough rows, interleaved authors, negative IDs, deep offsets, maximum integer offsets and fresh follow/article changes. The existing grouped-page and page-before-count tests still apply. A related within-statement rank-bound strategy appears in the [Rust epoll submission's feed query](https://github.com/arjaythedev/multicore-server-challenge/blob/2f2b650/submissions/rust-epoll-theCatWisel/src/queries.rs); this implementation retains its own separate page/count snapshots and bounded per-page probe.
+
+## Prepared mutation statements
+
+The read catalog already retained prepared plans. Eleven mutation and follow-up lookup statements now use the same lifetime, instead of being parsed and planned again after each write. Their SQL, parameter ownership and transaction sequencing are unchanged. BEGIN, COMMIT and ROLLBACK retain their existing execution path. Recovery requires all 43 statements to be rebuilt before reusing a replacement connection. Native verification passed all 197 unchanged steps, the 15 write cases and nine failure/concurrency cases, including a lost COMMIT acknowledgement without replay.

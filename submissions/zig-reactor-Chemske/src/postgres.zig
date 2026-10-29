@@ -143,6 +143,12 @@ fn statementName(route: http.Route, read: ?articles.Read) [:0]const u8 {
 }
 
 fn prepareItem(index: usize) ?struct { name: [:0]const u8, sql: [:0]const u8 } {
+    if (index >= 32) {
+        const operation_index = index - 32;
+        if (operation_index >= operations.prepared.len) return null;
+        const item = operations.prepared[operation_index];
+        return .{ .name = item.name, .sql = item.sql };
+    }
     const routes = [_]http.Route{ .tags, .register, .login, .current, .update, .profile, .follow, .unfollow, .comments };
     if (index < routes.len) return .{ .name = statementName(routes[index], null), .sql = querySql(routes[index], null) };
     const offset = index - routes.len;
@@ -183,6 +189,18 @@ pub fn send(conn: *Conn, statement: [:0]const u8, params: []const ?[:0]const u8)
     for (params, 0..) |param, i| values[i] = if (param) |p| p.ptr else null;
     // libpq copies the parameter bytes before this call returns.
     if (PQsendQueryParams(conn, statement.ptr, @intCast(params.len), null, &values, null, null, 0) != 1) return error.DatabaseQuery;
+}
+
+pub fn sendOperation(conn: *Conn, query_value: operations.Query) !void {
+    if (prepared_queries) {
+        if (query_value.prepared_name) |name| {
+            var values: [6]?[*:0]const u8 = @splat(null);
+            for (query_value.params[0..query_value.count], 0..) |param, index| values[index] = if (param) |value| value.ptr else null;
+            if (PQsendQueryPrepared(conn, name.ptr, @intCast(query_value.count), &values, null, null, 0) != 1) return error.DatabaseQuery;
+            return;
+        }
+    }
+    try send(conn, query_value.statement, query_value.params[0..query_value.count]);
 }
 
 pub fn status(result: *Result) u16 {
