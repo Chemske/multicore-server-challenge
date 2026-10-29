@@ -32,7 +32,7 @@ const Database = struct {
     fd: c_int = -1,
     followers: [read_batch.capacity - 1]?*requests.Task = @splat(null),
     follower_count: usize = 0,
-    read_group: enum { none, article, comments, pages } = .none,
+    read_group: enum { none, article, comments, compact_comments, pages } = .none,
 };
 const State = enum { closed, reading, queued, database, hashing, writing };
 const Client = struct {
@@ -69,6 +69,7 @@ const Server = struct {
     password_rejections: u64 = 0,
     database_failures: u64 = 0,
     responses_503: u64 = 0,
+    compact_comment_batches: u64 = 0,
     queued_dispatches: u64 = 0,
     queue_wait_ms: u64 = 0,
     max_queue_wait_ms: u64 = 0,
@@ -468,6 +469,24 @@ const Server = struct {
             }
             return;
         }
+        if (database.read_group == .compact_comments) {
+            var decoded = pg.compactComments(result, group.len, group[0].arena.allocator()) catch {
+                for (group) |task| task.status = 503;
+                return;
+            };
+            defer decoded.deinit();
+            for (group, 0..) |task, index| {
+                const rows = decoded.rows(index, task.arena.allocator()) catch {
+                    task.status = 503;
+                    continue;
+                };
+                if (rows) |comments| {
+                    task.operation.?.comments = comments;
+                    task.status = 200;
+                } else task.status = 404;
+            }
+            return;
+        }
         if (database.read_group == .comments) {
             var bounds: [read_batch.capacity + 1]usize = undefined;
             pg.readBatchBounds(result, group.len, 10, &bounds) catch {
@@ -799,8 +818,10 @@ const Server = struct {
                     inputs[database.follower_count] = input;
                 }
                 if (database.follower_count != 0) {
-                    database.read_group = if (task.route == .comments) .comments else .article;
-                    pg.sendReadBatch(database.connection.?, inputs[0 .. database.follower_count + 1], task.arena.allocator(), task.route == .comments) catch {
+                    const compact = @import("build_options").compact_comments and task.route == .comments and read_batch.overlappingComments(inputs[0 .. database.follower_count + 1]);
+                    database.read_group = if (compact) .compact_comments else if (task.route == .comments) .comments else .article;
+                    if (compact) self.compact_comment_batches += 1;
+                    pg.sendReadBatch(database.connection.?, inputs[0 .. database.follower_count + 1], task.arena.allocator(), task.route == .comments, compact) catch {
                         self.databaseFailed(slot);
                         continue;
                     };
@@ -863,6 +884,7 @@ const Server = struct {
             }
             if (current >= self.next_stats) {
                 const password_stats = self.pool.stats();
+                std.log.info("comment_stats id={d} compact_batches={d}", .{ self.reactor_id, self.compact_comment_batches });
                 std.log.info("password_stats id={d} outstanding={d} batches_1={d} batches_2={d} batches_3={d} batches_4={d}", .{ self.reactor_id, password_stats.outstanding, password_stats.batches[0], password_stats.batches[1], password_stats.batches[2], password_stats.batches[3] });
                 self.next_stats = current + 10_000;
                 std.log.info("reactor_stats id={d} admitted={d} active={d} peak={d} capacity_503={d} password_503={d} db_failures={d} responses_503={d} dispatches={d} queue_wait_ms={d} queue_max_ms={d} input_bytes={d} output_bytes={d}", .{ self.reactor_id, self.admitted, self.task_count, self.peak_tasks, self.capacity_rejections, self.password_rejections, self.database_failures, self.responses_503, self.queued_dispatches, self.queue_wait_ms, self.max_queue_wait_ms, self.input_bytes, self.output_bytes });
@@ -1030,4 +1052,5 @@ test {
     _ = @import("profiles.zig");
     _ = @import("url.zig");
     _ = @import("articles.zig");
+    _ = @import("operations.zig");
 }

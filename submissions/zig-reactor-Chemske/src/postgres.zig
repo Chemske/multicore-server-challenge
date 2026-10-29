@@ -143,6 +143,7 @@ fn statementName(route: http.Route, read: ?articles.Read) [:0]const u8 {
 }
 
 fn prepareItem(index: usize) ?struct { name: [:0]const u8, sql: [:0]const u8 } {
+    if (index == 32 + operations.prepared.len) return .{ .name = "batch_comments_compact", .sql = read_batch.compact_comments_sql };
     if (index >= 32) {
         const operation_index = index - 32;
         if (operation_index >= operations.prepared.len) return null;
@@ -333,20 +334,24 @@ fn articleAt(result: *Result, row: c_int, offset: c_int, allocator: std.mem.Allo
     };
 }
 
-pub fn sendReadBatch(conn: *Conn, inputs: []const read_batch.Input, allocator: std.mem.Allocator, comments: bool) !void {
+pub fn sendReadBatch(conn: *Conn, inputs: []const read_batch.Input, allocator: std.mem.Allocator, comments: bool, compact: bool) !void {
     const params = try read_batch.parameters(allocator, inputs);
     if (prepared_queries) {
         const values = [_]?[*:0]const u8{ params[0].ptr, params[1].ptr };
-        if (PQsendQueryPrepared(conn, if (comments) "batch_comments" else "batch_single", 2, &values, null, null, 0) != 1) return error.DatabaseQuery;
-    } else try send(conn, if (comments) read_batch.comments_sql else read_batch.single_sql, &.{ params[0], params[1] });
+        if (PQsendQueryPrepared(conn, if (compact) "batch_comments_compact" else if (comments) "batch_comments" else "batch_single", 2, &values, null, null, 0) != 1) return error.DatabaseQuery;
+    } else try send(conn, if (compact) read_batch.compact_comments_sql else if (comments) read_batch.comments_sql else read_batch.single_sql, &.{ params[0], params[1] });
 }
 
 pub fn readBatchBounds(result: *Result, expected: usize, columns: c_int, bounds: *[read_batch.capacity + 1]usize) !void {
+    return readBatchBoundsFrom(result, expected, columns, bounds, 0);
+}
+
+fn readBatchBoundsFrom(result: *Result, expected: usize, columns: c_int, bounds: *[read_batch.capacity + 1]usize, start: usize) !void {
     if (PQresultStatus(result) != 2 or PQnfields(result) != columns) return error.DatabaseResult;
     const count: usize = @intCast(PQntuples(result));
-    if (count < expected or count > expected * 100) return error.DatabaseResult;
+    if (start > count or count - start < expected or count - start > expected * 100) return error.DatabaseResult;
     var previous: usize = 0;
-    for (0..count) |row| {
+    for (start..count) |row| {
         const ordinal = std.fmt.parseInt(usize, try required(result, @intCast(row), 0), 10) catch return error.DatabaseResult;
         if (ordinal == 0 or ordinal > expected or ordinal < previous or ordinal > previous + 1) return error.DatabaseResult;
         if (ordinal != previous) bounds[ordinal - 1] = row;
@@ -354,6 +359,63 @@ pub fn readBatchBounds(result: *Result, expected: usize, columns: c_int, bounds:
     }
     if (previous != expected) return error.DatabaseResult;
     bounds[expected] = count;
+}
+
+pub const CompactComments = struct {
+    const Meta = struct { article: i64, value: operations.Comment, bytes: usize };
+    result: *Result,
+    metadata: std.AutoHashMap(i64, Meta),
+    bounds: [read_batch.capacity + 1]usize,
+
+    pub fn deinit(self: *CompactComments) void {
+        self.metadata.deinit();
+    }
+
+    pub fn rows(self: *const CompactComments, index: usize, allocator: std.mem.Allocator) !?[]operations.Comment {
+        const begin = self.bounds[index];
+        const end = self.bounds[index + 1];
+        if (begin >= end or end - begin > 100) return error.DatabaseResult;
+        if (cell(self.result, @intCast(begin), 1) == null) return null;
+        if (cell(self.result, @intCast(begin), 2) == null) {
+            if (end != begin + 1) return error.DatabaseResult;
+            return &.{};
+        }
+        const output = try allocator.alloc(operations.Comment, end - begin);
+        var total: usize = 0;
+        for (output, begin..) |*comment, row| {
+            const article = std.fmt.parseInt(i64, try required(self.result, @intCast(row), 1), 10) catch return error.DatabaseResult;
+            const id = std.fmt.parseInt(i64, try required(self.result, @intCast(row), 2), 10) catch return error.DatabaseResult;
+            const meta = self.metadata.get(id) orelse return error.DatabaseResult;
+            if (meta.article != article) return error.DatabaseResult;
+            total += meta.bytes;
+            if (total > 4 * 1024 * 1024) return error.ResponseTooLarge;
+            comment.* = meta.value;
+            comment.author.following = try boolean(self.result, @intCast(row), 9);
+        }
+        return output;
+    }
+};
+
+pub fn compactComments(result: *Result, expected: usize, allocator: std.mem.Allocator) !CompactComments {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != 11) return error.DatabaseResult;
+    const count: usize = @intCast(PQntuples(result));
+    if (count < expected or count > expected * 200) return error.DatabaseResult;
+    var group: CompactComments = .{ .result = result, .metadata = .init(allocator), .bounds = undefined };
+    errdefer group.deinit();
+    var start: usize = 0;
+    while (start < count) : (start += 1) {
+        const ordinal = std.fmt.parseInt(usize, try required(result, @intCast(start), 0), 10) catch return error.DatabaseResult;
+        if (ordinal != 0) break;
+        var bytes: usize = 0;
+        var value = try commentAt(result, @intCast(start), 2, allocator, &bytes);
+        try value.encodeForGroup(allocator);
+        const article = std.fmt.parseInt(i64, try required(result, @intCast(start), 1), 10) catch return error.DatabaseResult;
+        const entry = try group.metadata.getOrPut(value.id);
+        if (entry.found_existing) return error.DatabaseResult;
+        entry.value_ptr.* = .{ .article = article, .value = value, .bytes = bytes };
+    }
+    try readBatchBoundsFrom(result, expected, 11, &group.bounds, start);
+    return group;
 }
 
 pub fn commentsBatchRows(result: *Result, begin: usize, end: usize, allocator: std.mem.Allocator) !?[]operations.Comment {

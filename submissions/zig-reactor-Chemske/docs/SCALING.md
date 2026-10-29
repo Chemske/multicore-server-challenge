@@ -43,7 +43,7 @@ A count-boundary test pauses the second SQL statement, inserts a new article ext
 
 `tests/linux_connections.py` checks 150,000 retained sockets and an HTTP response on each, followed by database reads on reused sockets. It uses several loopback source addresses to avoid the per-destination ephemeral-port ceiling. It does not claim 150,000 workload users. The test changes no kernel settings; the CI helper raises only its own descriptor limit to match the benchmark service.
 
-Build-time controls live in `build.zig`: `reactors`, `db-connections`, `write-connections`, `max-tasks`, `max-clients`, `read-batch-size`, `bcrypt-workers`, `bcrypt-jobs`, `bcrypt-lanes`, `bcrypt-gather-ms`, `feed-prune`, `page-batch`, `comments-batch`, `article-batch`, `tag-batch`, `generic-plans`, `prepared-queries`, `eager-write` and `epoll-pause`. Runtime configuration remains exactly the four variables in the challenge contract.
+Build-time controls live in `build.zig`: `reactors`, `db-connections`, `write-connections`, `max-tasks`, `max-clients`, `read-batch-size`, `bcrypt-workers`, `bcrypt-jobs`, `bcrypt-lanes`, `bcrypt-gather-ms`, `feed-prune`, `page-batch`, `comments-batch`, `compact-comments`, `article-batch`, `tag-batch`, `generic-plans`, `prepared-queries`, `eager-write` and `epoll-pause`. Runtime configuration remains exactly the four variables in the challenge contract.
 
 `benchmarks/linux_compare.py` preserves raw results, endpoint histograms, workload mix, error counts, generator-limit flags, executable fingerprints and diagnostics. Each run uses a fresh full-seed clone and removes its temporary server/database even on failure. CI-only workflow changes stay on the fork's separate diagnostic branch, outside the submission pull request.
 
@@ -71,4 +71,12 @@ The first separate-generator 100,000-user diagnostic did not show an end-to-end 
 
 ## Prepared mutation statements
 
-The read catalog already retained prepared plans. Eleven mutation and follow-up lookup statements now use the same lifetime, instead of being parsed and planned again after each write. Their SQL, parameter ownership and transaction sequencing are unchanged. BEGIN, COMMIT and ROLLBACK retain their existing execution path. Recovery requires all 43 statements to be rebuilt before reusing a replacement connection. Native verification passed all 197 unchanged steps, the 15 write cases and nine failure/concurrency cases, including a lost COMMIT acknowledgement without replay.
+The read catalog already retained prepared plans. Eleven mutation and follow-up lookup statements now use the same lifetime, instead of being parsed and planned again after each write. Their SQL, parameter ownership and transaction sequencing are unchanged. BEGIN, COMMIT and ROLLBACK retain their existing execution path. Recovery requires all 44 statements to be rebuilt before reusing a replacement connection. Native verification passed all 197 unchanged steps, the 15 write cases and nine failure/concurrency cases, including a lost COMMIT acknowledgement without replay.
+
+## Compact comment groups
+
+The optional compact representation is selected only when at least half of a captured comment group's slugs repeat. Other groups retain the ordinary query. The SQL returns each comment's metadata once and separate recipient IDs, order positions and following flags. Position is derived from the original timestamp and ID order before millisecond formatting. Missing articles and empty lists remain distinct.
+
+The primary task owns the metadata and its standard-encoded JSON. A recorded boolean offset allows each recipient's following flag to be emitted without re-encoding the shared strings. No raw user string enters JSON without standard escaping, and no internal encoding field is exposed by the API. Every follower is serialized before the primary arena is released. Nothing survives the group, and no later request can join it.
+
+Native checks passed 24 unit tests, the mixed comment/freshness/SQL-error cases, 197 unchanged steps and the Go comparison. A targeted test disconnects the primary socket after the group reaches PostgreSQL while other recipients remain active, then verifies every surviving response. This is still an experimental control until a separate-generator measurement shows a useful gain.
