@@ -149,7 +149,7 @@ fn expand(comptime width: usize, comptime salted: bool, states: *[width]State, k
 }
 
 pub fn derive(comptime width: usize, passwords: [width][]const u8, salts: [width][16]u8, comptime cost: u6) [width][23]u8 {
-    if (width < 1 or width > 4) @compileError("bcrypt width must be 1-4");
+    if (width < 1 or width > 6) @compileError("bcrypt width must be 1-6");
     if (cost < 4 or cost > 31) @compileError("bcrypt cost must be 4-31");
     var states: [width]State = @splat(.{});
     defer std.crypto.secureZero(u8, std.mem.asBytes(&states));
@@ -201,7 +201,7 @@ pub fn derive(comptime width: usize, passwords: [width][]const u8, salts: [width
 test "independent bcrypt lanes match standard-library output for byte and length boundaries" {
     const long: [80]u8 = @splat(0xe9);
     const inputs = [_][]const u8{ "", "a", "password123", "pässword ☕", long[0..71], long[0..72], &long };
-    inline for (1..5) |width| {
+    inline for (1..7) |width| {
         for (inputs, 0..) |_, index| {
             var passwords: [width][]const u8 = undefined;
             var salts: [width][16]u8 = undefined;
@@ -219,12 +219,12 @@ test "independent bcrypt lanes match standard-library output for byte and length
 }
 
 test "every supported width retains every cost-ten round" {
-    const passwords = [4][]const u8{ "password123", "different password", "non-ascii é", "" };
-    var salts: [4][16]u8 = undefined;
+    const passwords = [6][]const u8{ "password123", "different password", "non-ascii é", "", "five independent", "six independent" };
+    var salts: [6][16]u8 = undefined;
     for (&salts, 0..) |*salt, lane| {
         for (salt, 0..) |*byte, index| byte.* = @truncate(lane * 53 + index * 19);
     }
-    inline for (1..5) |width| {
+    inline for (1..7) |width| {
         const actual = derive(width, passwords[0..width].*, salts[0..width].*, 10);
         for (passwords[0..width], salts[0..width], actual) |password, salt, digest| {
             const expected = bcrypt.bcrypt(password, &salt, .{ .rounds_log = 10, .silently_truncate_password = true });
