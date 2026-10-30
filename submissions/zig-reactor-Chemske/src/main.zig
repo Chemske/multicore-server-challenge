@@ -56,6 +56,7 @@ const Server = struct {
     database_url: [*:0]const u8,
     clients: []Client,
     pool: *bcrypt.Pool,
+    password_owner: usize = 0,
     secret: []const u8,
     scheduler: scheduling.Scheduler,
     task_count: usize = 0,
@@ -250,6 +251,7 @@ const Server = struct {
     }
 
     fn startHash(self: *Server, task: *requests.Task) void {
+        task.job.owner = self.password_owner;
         const index = task.recipient.index;
         self.clients[index].state = .hashing;
         self.loop.watch(self.clients[index].fd, self.token(index), false, false) catch {
@@ -284,7 +286,7 @@ const Server = struct {
 
     fn workerReady(self: *Server) void {
         var completed: [bcrypt.capacity]*bcrypt.Job = undefined;
-        const count = self.pool.collect(&completed);
+        const count = self.pool.collectOwner(self.password_owner, &completed);
         for (completed[0..count]) |job| {
             const task: *requests.Task = @fieldParentPtr("job", job);
             if (!self.isLive(task)) {
@@ -958,7 +960,7 @@ const Server = struct {
 
     fn run(self: *Server) !void {
         try self.loop.watch(self.listener, listener_token, true, false);
-        try self.loop.watch(self.pool.pipe[0], worker_token, true, false);
+        try self.loop.watch(self.pool.readPipe(self.password_owner), worker_token, true, false);
         for (0..self.databases.len) |index| try self.watchDatabase(index, true, false);
         var ready: [128]events.Event = undefined;
         while (true) {
@@ -1002,7 +1004,7 @@ const Server = struct {
                 self.closeClient(expired);
             }
             if (current >= self.next_stats) {
-                const password_stats = self.pool.stats();
+                const password_stats = self.pool.statsFor(self.password_owner);
                 std.log.info("comment_stats id={d} compact_batches={d}", .{ self.reactor_id, self.compact_comment_batches });
                 std.log.info("favorite_stats id={d} batches={d} fallbacks={d}", .{ self.reactor_id, self.favorite_batches, self.favorite_fallbacks });
                 std.log.info("password_stats id={d} outstanding={d} batches_1={d} batches_2={d} batches_3={d} batches_4={d}", .{ self.reactor_id, password_stats.outstanding, password_stats.batches[0], password_stats.batches[1], password_stats.batches[2], password_stats.batches[3] });
@@ -1074,7 +1076,7 @@ fn share(total: usize, reactor_id: usize) usize {
     return total / reactor_count + @intFromBool(reactor_id < total % reactor_count);
 }
 
-const Config = struct { url: [*:0]const u8, secret: []const u8, host: []const u8, port: u16, clients: usize };
+const Config = struct { url: [*:0]const u8, secret: []const u8, host: []const u8, port: u16, clients: usize, password_pool: ?*bcrypt.Pool = null };
 
 fn runReactor(config: Config, allocator: std.mem.Allocator, io: std.Io, reactor_id: usize) !void {
     const capacity = share(config.clients, reactor_id);
@@ -1085,9 +1087,10 @@ fn runReactor(config: Config, allocator: std.mem.Allocator, io: std.Io, reactor_
     const clients = try allocator.alloc(Client, capacity);
     defer allocator.free(clients);
     @memset(clients, .{});
-    var pool: bcrypt.Pool = .{};
-    try pool.start(io, share(bcrypt.worker_count, reactor_id), share(bcrypt.capacity, reactor_id));
-    defer {
+    var private_pool: bcrypt.Pool = .{};
+    const pool = config.password_pool orelse &private_pool;
+    if (config.password_pool == null) try pool.start(io, share(bcrypt.worker_count, reactor_id), share(bcrypt.capacity, reactor_id));
+    defer if (config.password_pool == null) {
         pool.stop();
         var completed: [bcrypt.capacity]*bcrypt.Job = undefined;
         const count = pool.collect(&completed);
@@ -1095,7 +1098,7 @@ fn runReactor(config: Config, allocator: std.mem.Allocator, io: std.Io, reactor_
             const task: *requests.Task = @fieldParentPtr("job", job);
             task.destroy(allocator);
         }
-    }
+    };
     var database_storage: [database_connections]Database = @splat(.{});
     const databases = database_storage[0..share(database_connections, reactor_id)];
     defer for (databases) |*database| {
@@ -1123,14 +1126,15 @@ fn runReactor(config: Config, allocator: std.mem.Allocator, io: std.Io, reactor_
         .reactor_id = reactor_id,
         .database_url = url,
         .clients = clients,
-        .pool = &pool,
+        .pool = pool,
+        .password_owner = if (config.password_pool != null) reactor_id else 0,
         .secret = secret,
         .scheduler = scheduler,
     };
     defer {
         for (0..clients.len) |index| server.closeClient(index);
     }
-    std.log.info("reactor {d} thread={d}: all API routes on {s}:{d}; {d} database connections, {d} client slots, {d} bcrypt workers, prepared API queries: {}", .{ reactor_id, std.Thread.getCurrentId(), host, port, databases.len, capacity, share(bcrypt.worker_count, reactor_id), pg.prepared_queries });
+    std.log.info("reactor {d} thread={d}: all API routes on {s}:{d}; {d} database connections, {d} client slots, {d} bcrypt workers, prepared API queries: {}", .{ reactor_id, std.Thread.getCurrentId(), host, port, databases.len, capacity, (if (config.password_pool != null) bcrypt.worker_count else share(bcrypt.worker_count, reactor_id)), pg.prepared_queries });
     try server.run();
 }
 
@@ -1147,12 +1151,16 @@ pub fn main(init: std.process.Init) !void {
     const url = env.getPosix("DATABASE_URL") orelse return error.MissingDatabaseUrl;
     const secret = env.getPosix("JWT_SECRET") orelse return error.MissingJwtSecret;
     if (secret.len == 0) return error.EmptyJwtSecret;
+    var password_pool: bcrypt.Pool = .{};
+    if (@import("build_options").shared_bcrypt) try password_pool.startShared(init.io, bcrypt.worker_count, bcrypt.capacity, reactor_count);
+    defer if (@import("build_options").shared_bcrypt) password_pool.stop();
     const config: Config = .{
         .url = url,
         .secret = secret,
         .host = env.getPosix("HOST") orelse "127.0.0.1",
         .port = try std.fmt.parseInt(u16, env.getPosix("PORT") orelse "3000", 10),
         .clients = try clientCapacity(),
+        .password_pool = if (@import("build_options").shared_bcrypt) &password_pool else null,
     };
     for (1..reactor_count) |index| {
         const thread = try std.Thread.spawn(.{}, reactorEntry, .{ config, init.gpa, init.io, index });
