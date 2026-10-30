@@ -6,6 +6,8 @@ This submission implements the complete Conduit API for the Multicore Server Cha
 
 The server uses independent readiness reactors, owned non-blocking PostgreSQL connections and bounded bcrypt workers. Each reactor owns its listeners, clients, queues and database sessions. Compatible tags, articles, comments and list pages already waiting before dispatch share SQL work. Dedicated write owners keep reads progressing during slow commits. It never caches database data, JWT checks or bcrypt results.
 
+**Independent v2 result:** 120,000 users held for five measured minutes on an Oracle Ubuntu x86_64 target with eight vCPUs and 16 GiB RAM, using the full seed and three separate load generators: 30,254 requests/s, p50 162.687 ms, p95 470.783 ms, p99 653.823 ms and 0.1024% errors. The unmodified search also records the failed 130,000-user hold. This is an independent result, not an official leaderboard score. Exact source, build fingerprint, hardware, protocol and every search phase are in [v2-oracle.json](benchmarks/results/v2-oracle.json).
+
 **First official result:** [version 1](https://github.com/arjaythedev/multicore-server-challenge/pull/73) held 20,000 users for five minutes at 5,241 requests/s. Its 2,048-task admission ceiling rejected work above that level with CPU still available. The scaling changes and new Linux measurements are described in [SCALING.md](docs/SCALING.md); they do not establish a new official score. Historical Mac measurements remain in [PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Stack
@@ -77,7 +79,7 @@ TEMPLATE=conduit_seed PORT=3105 bash ../../test/run.sh .
 
 The full-seed commands require the unchanged official full seed in the dedicated cluster. Seed generation is not implicit: allow disk space for the template, one temporary clone and WAL. `tests/full_seed.py` runs Zig and Go sequentially so two full clones are never retained together. Each integration harness removes its temporary servers and databases, including on failure.
 
-There are nineteen Zig unit checks and focused groups covering HTTP framing, auth, profiles, article/feed reads, mutations, commit visibility, rollback, disconnected clients and database recovery. The many-connection check uses 8,000 actual sockets with slot replacement and pressure/deadline cases; a separate scheduler unit check exercises 100,000 simulated slots. Neither establishes 100,000 live connections on Linux.
+There are 27 Zig unit checks and focused groups covering HTTP framing, auth, profiles, article/feed reads, mutations, commit visibility, rollback, disconnected clients and database recovery. Linux also checks 150,000 retained sockets with an HTTP response on each; the native connection test uses 8,000 sockets. These are connection-correctness checks, separate from active-user capacity.
 
 The optional `python3 tests/recovery.py --restart-cluster` restarts only the dedicated project cluster and temporarily interrupts the interactive server. It is kept separate from routine editor tasks.
 
@@ -95,7 +97,7 @@ The configured client ceiling is 196,608, reduced to existing descriptor limits 
 
 ## Evidence
 
-The latest 8,000-user native release hold fails the latency/error targets while two existing VM workloads share the Mac. The A/B session is also confounded by their startup. These results are retained and do not support an official capacity or isolated throughput-gain claim.
+The current Linux result comes from the full-seed capacity search described above. Historical Mac holds, including failed and confounded comparisons, remain recorded in PERFORMANCE.md; they are not converted into Linux user counts or added together as speedup percentages.
 
 [VALIDATION.md](docs/VALIDATION.md) records the final correctness, fault and Ubuntu checks.
 

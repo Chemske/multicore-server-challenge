@@ -142,3 +142,17 @@ The selected Linux candidate uses four reactors, 40 total database owners includ
 On an eight-vCPU, 16-GiB Oracle EPYC 9J14 target with three separate generators, the compact four-reactor candidate passed a 120-second measured probe at 120,000 normal-clock users: 31,194.825 requests/s, p50 60.191 ms, p95 190.975 ms, p99 276.735 ms and zero errors. Two reactors also passed, with p95 265.471 ms; one password worker with two reactors passed with p95 275.199 ms. The database was freshly copied from the full seed, passed all 197 checks, reset again, then warmed before these sequential comparisons. Database age differs between candidates, so these probes do not establish an isolated percentage speedup or a five-minute capacity score.
 
 The same CPU's isolated three-trial comparison measured 19.983 ms per complete hash at width three, versus 40.183 ms at five and 37.483 ms at six. Checksums agreed. Wider diagnostic calculations were therefore not integrated into the runtime worker pool.
+
+## Verified independent capacity search
+
+The plain Linux build at `1f32410627405c139eb926a2ece95bbd9ddc7a5f` passed the unchanged full-seed conformance suite, then the unchanged switch script reset the database and dropped caches. The unchanged distributed search used three separate four-vCPU/eight-GiB load generators, normal think/session times, a three-minute warm-up, two-minute probes including their ramps and five measured minutes for each hold. The target was Ubuntu 24.04, eight vCPUs on four EPYC 9J14 physical cores with SMT, 15,983 MiB RAM and no swap. PostgreSQL used the published configuration; there was no CPU affinity or extra kernel tuning.
+
+| Phase | Users | Requests/s, including errors | p50 ms | p95 ms | p99 ms | Errors | Result |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Probe | 100,000 | 26,397 | 17.2 | 54.3 | 83.1 | 0% | Pass |
+| Probe | 130,000 | 32,695 | 175.2 | 497.4 | 679.9 | 0.60% | Pass |
+| Probe | 140,000 | 34,651 | 239.2 | 640.5 | 866.3 | 5.22% | Fail |
+| Five-minute hold | 130,000 | 32,375 | 207.2 | 580.1 | 795.1 | 1.75% | Fail |
+| Five-minute hold | **120,000** | **30,254** | **162.687** | **470.783** | **653.823** | **0.1024%** | **Pass** |
+
+The 150,000- and 190,000-user probes also failed. [Sanitized aggregate evidence](../benchmarks/results/v2-oracle.json) retains every probe and hold, endpoint distributions, generator load and measured target CPU/steal. The five-minute result is the capacity evidence; the higher short probe is not substituted for it. Oracle hardware and CPU steal differ from the organizer's dedicated host, so this result cannot establish a leaderboard rank or a same-machine speedup against the official v1 score.
