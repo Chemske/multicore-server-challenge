@@ -716,5 +716,9 @@
     "target_cpu_mean_pct": 91.975,
     "target_steal_mean_pct": 7.755,
     "raw_merged_sha256": "e3a732820da6ea846b465b3a9f521318876c6ad284630f05523967a8889c3d49"
-  }
+  },
+  "final_validation_ci": [
+    "https://github.com/Chemske/multicore-server-challenge/actions/runs/41045355459",
+    "https://github.com/Chemske/multicore-server-challenge/actions/runs/41046946269"
+  ]
 }
