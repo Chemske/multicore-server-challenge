@@ -286,7 +286,22 @@ with Server(results, secret, 'writes', 'focus', submission / 'zig-out/bin/condui
             break
         assert status == 503 and time.monotonic() < deadline
         time.sleep(0.03)
-    assert create('m5 request after recovery')[0] == 201
+    # A healthy read owner does not imply that the independent write owners
+    # have finished reconnecting. Probe their bounded recovery with distinct
+    # operations, and require every rejected operation to remain absent.
+    deadline = time.monotonic() + 10
+    attempt = 0
+    while True:
+        title = 'm5 request after recovery ' + str(attempt)
+        status, response = create(title)
+        if status == 201:
+            assert zig.sql(f'SELECT count(*) FROM articles WHERE title={literal(title)}') == '1'
+            break
+        assert status == 503, (status, response)
+        assert zig.sql(f'SELECT count(*) FROM articles WHERE title={literal(title)}') == '0'
+        assert time.monotonic() < deadline, 'write owners did not recover within ten seconds'
+        attempt += 1
+        time.sleep(.03)
     assert zig.sql("SELECT count(*) FROM articles WHERE title='m5 lost transaction'") == '0'
     passed('backend loss rolls back the open transaction, returns 503 and never automatically replays a write')
 
