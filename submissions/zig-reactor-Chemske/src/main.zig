@@ -521,6 +521,21 @@ const Server = struct {
         }
         if (database.read_group == .pages) {
             const count = group[0].read.?.phase == .count;
+            if (!count and @import("build_options").compact_pages) {
+                var decoded = pg.compactPages(result, group.len, group[0].arena.allocator()) catch {
+                    for (group) |task| task.status = 503;
+                    return;
+                };
+                defer decoded.deinit();
+                for (group, 0..) |task, index| {
+                    task.read.?.rows = decoded.rows(index, task.arena.allocator()) catch {
+                        task.status = 503;
+                        continue;
+                    };
+                    task.status = 200;
+                }
+                return;
+            }
             var bounds: [read_batch.capacity + 1]usize = undefined;
             pg.readBatchBounds(result, group.len, if (count) 2 else 13, &bounds) catch {
                 for (group) |task| task.status = 503;

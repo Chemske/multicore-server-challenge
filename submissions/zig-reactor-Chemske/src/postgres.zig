@@ -604,6 +604,63 @@ pub const SharedArticles = struct {
     }
 };
 
+pub const CompactPages = struct {
+    const Meta = struct { value: articles.Article, bytes: usize };
+    result: *Result,
+    metadata: std.AutoHashMap(i64, Meta),
+    bounds: [read_batch.capacity + 1]usize,
+
+    pub fn deinit(self: *CompactPages) void {
+        self.metadata.deinit();
+    }
+
+    pub fn rows(self: *const CompactPages, index: usize, allocator: std.mem.Allocator) ![]articles.Article {
+        const begin = self.bounds[index];
+        const end = self.bounds[index + 1];
+        if (begin >= end or end - begin > 100) return error.DatabaseResult;
+        if (cell(self.result, @intCast(begin), 13) == null) {
+            if (end != begin + 1) return error.DatabaseResult;
+            return &.{};
+        }
+        const output = try allocator.alloc(articles.Article, end - begin);
+        var total: usize = 0;
+        for (output, begin..) |*article, row| {
+            const id = std.fmt.parseInt(i64, try required(self.result, @intCast(row), 13), 10) catch return error.DatabaseResult;
+            const position = std.fmt.parseInt(usize, try required(self.result, @intCast(row), 14), 10) catch return error.DatabaseResult;
+            if (position != row - begin + 1) return error.DatabaseResult;
+            const meta = self.metadata.get(id) orelse return error.DatabaseResult;
+            total += meta.bytes;
+            if (total > 4 * 1024 * 1024) return error.ResponseTooLarge;
+            article.* = meta.value;
+            article.favorited = try boolean(self.result, @intCast(row), 8);
+            article.author.following = try boolean(self.result, @intCast(row), 12);
+        }
+        return output;
+    }
+};
+
+pub fn compactPages(result: *Result, expected: usize, allocator: std.mem.Allocator) !CompactPages {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != 15) return error.DatabaseResult;
+    const count: usize = @intCast(PQntuples(result));
+    if (count < expected or count > expected * 200) return error.DatabaseResult;
+    var group: CompactPages = .{ .result = result, .metadata = .init(allocator), .bounds = undefined };
+    errdefer group.deinit();
+    var start: usize = 0;
+    while (start < count) : (start += 1) {
+        const ordinal = std.fmt.parseInt(usize, try required(result, @intCast(start), 0), 10) catch return error.DatabaseResult;
+        if (ordinal != 0) break;
+        var bytes: usize = 0;
+        var value = try articleAt(result, @intCast(start), 1, allocator, false, &bytes);
+        try value.encodeForGroup(allocator);
+        const id = std.fmt.parseInt(i64, try required(result, @intCast(start), 13), 10) catch return error.DatabaseResult;
+        const entry = try group.metadata.getOrPut(id);
+        if (entry.found_existing) return error.DatabaseResult;
+        entry.value_ptr.* = .{ .value = value, .bytes = bytes };
+    }
+    try readBatchBoundsFrom(result, expected, 15, &group.bounds, start);
+    return group;
+}
+
 pub fn pageBatchCount(result: *Result, row: usize) !i64 {
     const value = std.fmt.parseInt(i64, try required(result, @intCast(row), 1), 10) catch return error.DatabaseResult;
     if (value < 0 or value > 1000) return error.DatabaseResult;

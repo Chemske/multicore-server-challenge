@@ -51,19 +51,23 @@ fn pageSql(comptime family: articles.Family) [:0]const u8 {
         "to_char(a.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at, " ++
         "ARRAY(SELECT (SELECT t.name FROM tags t WHERE t.id=at.tag_id) AS name FROM article_tags at WHERE at.article_id=a.id ORDER BY name) AS tags, " ++
         "(SELECT count(*) FROM favorites f WHERE f.article_id=a.id) AS favorites,u.username,u.bio,u.image ";
-    const pages = comptime if (@import("build_options").shared_page_metadata)
+    const pages = comptime if (@import("build_options").shared_page_metadata or @import("build_options").compact_pages)
         "hits AS MATERIALIZED (SELECT k.key,k.lim,k.off,p.id FROM keys k CROSS JOIN LATERAL (" ++ ids(family) ++ ") p), " ++
             "enriched AS MATERIALIZED (SELECT " ++ metadata ++ "FROM articles a JOIN (SELECT DISTINCT id FROM hits) d ON d.id=a.id JOIN users u ON u.id=a.author_id), " ++
             "pages AS MATERIALIZED (SELECT h.key,h.lim,h.off,e.* FROM hits h JOIN enriched e ON e.id=h.id), "
     else
         "pages AS MATERIALIZED (SELECT k.key,k.lim,k.off," ++ metadata ++ "FROM keys k CROSS JOIN LATERAL (" ++ ids(family) ++ ") p JOIN articles a ON a.id=p.id JOIN users u ON u.id=a.author_id), ";
     const keys = comptime if (family == .feed and shared_feed_hubs) hubKeys(false) else "keys AS (SELECT DISTINCT key,lim,off FROM requested), ";
-    return comptime requested ++ keys ++ pages ++
-        "page_ids AS (SELECT key,lim,off,array_agg(id) AS ids,array_agg(DISTINCT author_id) AS authors FROM pages GROUP BY key,lim,off), " ++
+    const flags = "page_ids AS (SELECT key,lim,off,array_agg(id) AS ids,array_agg(DISTINCT author_id) AS authors FROM pages GROUP BY key,lim,off), " ++
         "flags AS MATERIALIZED (SELECT r.ordinal, " ++
         "ARRAY(SELECT f.article_id FROM favorites f WHERE f.user_id=r.viewer AND f.article_id=ANY(p.ids)) AS fav, " ++
         "ARRAY(SELECT fo.followee_id FROM follows fo WHERE fo.follower_id=r.viewer AND fo.followee_id=ANY(p.authors)) AS fol " ++
-        "FROM requested r LEFT JOIN page_ids p ON p.key=r.key AND p.lim=r.lim AND p.off=r.off) " ++
+        "FROM requested r LEFT JOIN page_ids p ON p.key=r.key AND p.lim=r.lim AND p.off=r.off) ";
+    if (@import("build_options").compact_pages) return comptime requested ++ keys ++ pages ++ flags ++
+        "SELECT 0::bigint AS ordinal,e.slug,e.title,e.description,e.created_at,e.updated_at,e.tags,e.favorites,false AS favorited,e.username,e.bio,e.image,false AS following,e.id,0::bigint AS position FROM enriched e " ++
+        "UNION ALL SELECT r.ordinal,NULL::text,NULL::text,NULL::text,NULL::text,NULL::text,NULL::text[],NULL::bigint,p.id=ANY(f.fav),NULL::text,NULL::text,NULL::text,p.author_id=ANY(f.fol),p.id,row_number() OVER(PARTITION BY r.ordinal ORDER BY p.id DESC) " ++
+        "FROM requested r JOIN flags f ON f.ordinal=r.ordinal LEFT JOIN pages p ON p.key=r.key AND p.lim=r.lim AND p.off=r.off ORDER BY 1,15";
+    return comptime requested ++ keys ++ pages ++ flags ++
         "SELECT r.ordinal,p.slug,p.title,p.description,p.created_at,p.updated_at,p.tags,p.favorites,p.id=ANY(f.fav),p.username,p.bio,p.image,p.author_id=ANY(f.fol) " ++
         "FROM requested r JOIN flags f ON f.ordinal=r.ordinal LEFT JOIN pages p ON p.key=r.key AND p.lim=r.lim AND p.off=r.off ORDER BY r.ordinal,p.id DESC";
 }
