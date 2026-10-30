@@ -131,6 +131,16 @@ jobs:
           python3 tests/linux_connections.py
           python3 tests/milestone5.py
           python3 tests/recovery.py --connections 40
+      - name: Validate shipping build defaults
+        if: inputs.mode == 'validation'
+        run: |
+          sudo prlimit --pid $$ --nofile=200000:200000
+          ulimit -n 200000
+          cd submissions/zig-reactor-Chemske
+          bash build.sh
+          python3 tests/reactor.py --reactors 4
+          python3 tests/milestone5.py
+          python3 tests/recovery.py --connections 40
       - name: Compare two and four reactors under higher offered load
         if: inputs.mode == 'scaling'
         run: |
