@@ -12,6 +12,19 @@ pub const prepared_queries = @import("build_options").prepared_queries;
 pub const Conn = opaque {};
 pub const Result = opaque {};
 extern "c" fn PQconnectStart([*:0]const u8) ?*Conn;
+extern "c" fn PQconnectStartParams([*]const ?[*:0]const u8, [*]const ?[*:0]const u8, c_int) ?*Conn;
+const ConnOption = extern struct {
+    keyword: ?[*:0]const u8,
+    envvar: ?[*:0]const u8,
+    compiled: ?[*:0]const u8,
+    val: ?[*:0]const u8,
+    label: ?[*:0]const u8,
+    dispchar: ?[*:0]const u8,
+    dispsize: c_int,
+};
+extern "c" fn PQconninfoParse([*:0]const u8, *?[*:0]u8) ?[*]ConnOption;
+extern "c" fn PQconninfoFree([*]ConnOption) void;
+extern "c" fn PQfreemem(*anyopaque) void;
 extern "c" fn PQconnectPoll(*Conn) c_int;
 pub extern "c" fn PQsocket(*const Conn) c_int;
 extern "c" fn PQsetnonblocking(*Conn, c_int) c_int;
@@ -35,6 +48,53 @@ extern "c" fn PQresultErrorField(*const Result, c_int) ?[*:0]const u8;
 
 pub const Interest = struct { read: bool = false, write: bool = false, ready: bool = false };
 
+fn numericLoopback(value: []const u8) bool {
+    return std.mem.eql(u8, value, "127.0.0.1") or std.mem.eql(u8, value, "::1");
+}
+
+fn implicitLocalTls(url: [*:0]const u8) bool {
+    var message: ?[*:0]u8 = null;
+    const options = PQconninfoParse(url, &message) orelse {
+        if (message) |value| PQfreemem(@ptrCast(value));
+        return false;
+    };
+    defer PQconninfoFree(options);
+    var host: []const u8 = "";
+    var index: usize = 0;
+    while (options[index].keyword) |key| : (index += 1) {
+        const value = options[index].val orelse continue;
+        const keyword = std.mem.span(key);
+        const text = std.mem.span(value);
+        if (text.len == 0) continue;
+        if (std.mem.eql(u8, keyword, "host")) host = text;
+        if (std.mem.eql(u8, keyword, "hostaddr") and !numericLoopback(text)) return false;
+        if (std.mem.startsWith(u8, keyword, "ssl") or std.mem.eql(u8, keyword, "requiressl") or std.mem.eql(u8, keyword, "channel_binding") or std.mem.eql(u8, keyword, "service")) return false;
+    }
+    return numericLoopback(host);
+}
+
+fn startConnection(url: [*:0]const u8) ?*Conn {
+    if (@import("build_options").loopback_no_tls and implicitLocalTls(url)) {
+        // Explicit URL and environment security/routing choices retain libpq's
+        // ordinary behavior. Remote hosts never take this local-only path.
+        for ([_][*:0]const u8{ "PGSSLMODE", "PGREQUIRESSL", "PGSERVICE", "PGSERVICEFILE", "PGHOSTADDR", "PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY", "PGSSLCRL", "PGSSLCRLDIR", "PGSSLSNI", "PGSSLNEGOTIATION", "PGCHANNELBINDING" }) |key| {
+            if (c.getenv(key) != null) return PQconnectStart(url);
+        }
+        const keys = [_]?[*:0]const u8{ "sslmode", "dbname", null };
+        const values = [_]?[*:0]const u8{ "disable", url, null };
+        return PQconnectStartParams(&keys, &values, 1);
+    }
+    return PQconnectStart(url);
+}
+
+test "local optional TLS never overrides an explicit security or remote routing choice" {
+    try std.testing.expect(implicitLocalTls("postgres://a:p%40ss@127.0.0.1:5432/db"));
+    try std.testing.expect(implicitLocalTls("host=::1 dbname=test"));
+    for ([_][*:0]const u8{ "postgres://a@remote.example/db", "host=127.0.0.1 hostaddr=192.0.2.1", "host=remote.example hostaddr=127.0.0.1", "host=127.0.0.1 sslmode=require", "host=127.0.0.1 sslmode=verify-full", "host=127.0.0.1 service=custom", "host=127.0.0.1 sslrootcert=/tmp/cert", "host=127.0.0.1 channel_binding=require", "host=127.0.0.1,192.0.2.1", "invalid connection text" }) |url| {
+        try std.testing.expect(!implicitLocalTls(url));
+    }
+}
+
 // One owner advances both authentication and statement preparation from readiness
 // events. A replacement is never published until all prepared queries are drained.
 pub const Connector = struct {
@@ -45,7 +105,7 @@ pub const Connector = struct {
     successful: bool = false,
 
     pub fn start(url: [*:0]const u8) !Connector {
-        const conn = PQconnectStart(url) orelse return error.DatabaseConnect;
+        const conn = startConnection(url) orelse return error.DatabaseConnect;
         errdefer PQfinish(conn);
         if (PQsocket(conn) < 0) return error.DatabaseConnect;
         return .{ .conn = conn };
