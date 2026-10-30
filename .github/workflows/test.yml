@@ -116,19 +116,19 @@ jobs:
           sudo prlimit --pid $$ --nofile=200000:200000
           ulimit -n 200000
           cd submissions/zig-reactor-Chemske
-          zig build test -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=16 -Dwrite-connections=4 -Dread-batch-size=128 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=75 --summary all
-          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=1 -Ddb-connections=4 -Dread-batch-size=128 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true
+          zig build test -Dpg-root="$PGROOT" -Dreactors=4 -Ddb-connections=40 -Dwrite-connections=24 -Dshared-bcrypt=true -Dbcrypt-workers=2 -Dread-batch-size=512 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=75 --summary all
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=1 -Ddb-connections=4 -Dread-batch-size=512 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true
           python3 tests/feed_prune.py
           python3 tests/page_batch.py
           python3 tests/comment_batch.py --compact
-          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=2 -Ddb-connections=16 -Dwrite-connections=4 -Dread-batch-size=128 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true -Dmax-tasks=8192 -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=75
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=4 -Ddb-connections=40 -Dwrite-connections=24 -Dshared-bcrypt=true -Dbcrypt-workers=2 -Dread-batch-size=512 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true -Dmax-tasks=8192 -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=75
           python3 tests/favorite_batch.py
           python3 tests/password_batch.py
-          python3 tests/write_pool.py --writers 4
-          python3 tests/reactor.py --reactors 2
+          python3 tests/write_pool.py --writers 24
+          python3 tests/reactor.py --reactors 4
           python3 tests/linux_connections.py
           python3 tests/milestone5.py
-          python3 tests/recovery.py --connections 16
+          python3 tests/recovery.py --connections 40
       - name: Compare two and four reactors under higher offered load
         if: inputs.mode == 'scaling'
         run: |
