@@ -678,5 +678,43 @@
   "limitations": [
     "Oracle hardware and CPU steal differ from the organizer host; only the organizer determines rank.",
     "Requests/s includes failed requests; no capacity is extrapolated from Mac or socket-only tests."
-  ]
+  ],
+  "boundary_refinement": {
+    "stage": "Additional probe after the completed search, on its aged database",
+    "users": 125000,
+    "ramp_s": 60,
+    "measure_s": 60,
+    "overall": {
+      "count": 1853622,
+      "rps": 30893.7,
+      "p50_ms": 242.943,
+      "p90_ms": 552.447,
+      "p95_ms": 667.135,
+      "p99_ms": 926.719,
+      "max_ms": 1507.327,
+      "mean_ms": 280.9168479959782,
+      "errors": 57576,
+      "error_rate": 0.03106134907764366,
+      "statuses": {
+        "200": 1763560,
+        "201": 32002,
+        "204": 484,
+        "503": 57576
+      },
+      "error_classes": {
+        "http_503": 57576
+      }
+    },
+    "verdict": {
+      "pass": false,
+      "fail_reasons": [
+        "p95 667 ms >= 500",
+        "errors 3.11% >= 1%"
+      ],
+      "lg_limited": false
+    },
+    "target_cpu_mean_pct": 91.975,
+    "target_steal_mean_pct": 7.755,
+    "raw_merged_sha256": "e3a732820da6ea846b465b3a9f521318876c6ad284630f05523967a8889c3d49"
+  }
 }

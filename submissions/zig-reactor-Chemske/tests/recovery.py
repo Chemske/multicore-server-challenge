@@ -95,7 +95,7 @@ class Proxy:
                     client.close()
                 continue
             session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'article_groups': 0, 'article_single': 0, 'comment_groups': 0, 'compact_comment_groups': 0, 'comment_single': 0, 'page_groups': 0, 'count_groups': 0, 'page_queries': 0, 'count_queries': 0, 'pause': self.pause_new}
-            session.update(favorite_groups=0, favorite_single=0, favorite_pending=False, feed_hub_preparations=0, profile_groups=0, profile_single=0)
+            session.update(favorite_groups=0, favorite_single=0, favorite_pending=False, favorite_executions=[], feed_hub_preparations=0, profile_groups=0, profile_single=0)
             self.sessions.append(session)
             self.launch(self.frontend, session)
             self.launch(self.backend, session)
@@ -128,6 +128,26 @@ class Proxy:
                         session['tuning'].add(statement.split(b'\0', 1)[0])
                 elif header[:1] == b'B':
                     name = body.split(b'\0', 2)[1]
+                    if name in (b'batch_favorite', b'batch_unfavorite', b'op_favorite', b'op_unfavorite'):
+                        # Track original request identities, including legitimate
+                        # singleton groups, rather than treating every single
+                        # statement after an injected disconnect as a replay.
+                        parameters = body.split(b'\0', 2)[2]
+                        formats = struct.unpack_from('!H', parameters)[0]
+                        assert all(struct.unpack_from('!H', parameters, 2 + 2*i)[0] == 0 for i in range(formats))
+                        offset = 2 + 2*formats
+                        count = struct.unpack_from('!H', parameters, offset)[0]
+                        offset += 2
+                        values = []
+                        for _ in range(count):
+                            length = struct.unpack_from('!i', parameters, offset)[0]
+                            offset += 4
+                            assert length >= 0 and offset + length <= len(parameters)
+                            values.append(parameters[offset:offset+length])
+                            offset += length
+                        assert len(values) == 2
+                        viewers = tuple(map(int, values[0][1:-1].split(b','))) if name.startswith(b'batch_') else (int(values[0]),)
+                        session['favorite_executions'].append((name.decode('ascii'), viewers))
                     if name in (b'batch_favorite', b'batch_unfavorite'):
                         session['favorite_groups'] += 1
                         session['favorite_pending'] = True

@@ -154,8 +154,11 @@ The plain Linux build at `1f32410627405c139eb926a2ece95bbd9ddc7a5f` passed the u
 | Probe | 140,000 | 34,651 | 239.2 | 640.5 | 866.3 | 5.22% | Fail |
 | Five-minute hold | 130,000 | 32,375 | 207.2 | 580.1 | 795.1 | 1.75% | Fail |
 | Five-minute hold | **120,000** | **30,254** | **162.687** | **470.783** | **653.823** | **0.1024%** | **Pass** |
+| Later boundary probe | 125,000 | 30,894 | 242.943 | 667.135 | 926.719 | 3.1061% | Fail |
 
 The 150,000- and 190,000-user probes also failed. [Sanitized aggregate evidence](../benchmarks/results/v2-oracle.json) retains every probe and hold, endpoint distributions, generator load and measured target CPU/steal. The five-minute result is the capacity evidence; the higher short probe is not substituted for it. Oracle hardware and CPU steal differ from the organizer's dedicated host, so this result cannot establish a leaderboard rank or a same-machine speedup against the official v1 score.
+
+The additional 125,000-user probe followed the completed search on its aged database and also failed. It narrows the tested gap above the successful hold to 4.17%. It does not change the search's 120,000-user result. The runtime files and build settings remained identical throughout; the retained source matches the measured runtime at `1f32410`.
 
 ## Rejected shared author candidate experiment
 

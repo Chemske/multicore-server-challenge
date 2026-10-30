@@ -6,6 +6,8 @@
 
 The write recovery harness checks independent owners: successful tag reads establish read recovery, then distinct write probes must recover within ten seconds. Every rejected probe must leave its article absent; a successful probe must be durably present once. This avoids treating one recovered read connection as proof that all write owners have already completed their own reconnect and preparation.
 
+The lost favorite-commit test records request identities from PostgreSQL Bind messages. Its unique viewer cohort must execute exactly once per viewer after all owners recover, including a deliberately separate first-time singleton. This detects replay directly and permits ordinary singleton dispatch under multiple reactors. Counting every single statement as a replay could falsely fail when one reactor received only one request. Native identity and recovery checks pass without changing the application runtime.
+
 The final Linux default build uses plain `build.sh` as the unprivileged challenge user. [Run 41039422629](https://github.com/Chemske/multicore-server-challenge/actions/runs/41039422629) repeats the focused matrix, then builds with the shipping defaults and checks four serving reactors, all 197 unchanged steps, mutations and 40-owner recovery. On the independent Oracle target the default build also passed 27 unit checks and all 197 unchanged full-seed checks before the database was reset and performance measurement started. Workload capacity is reported separately in [SCALING.md](SCALING.md).
 
 ## Scaling revision — 29 October 2026
