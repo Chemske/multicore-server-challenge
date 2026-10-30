@@ -45,6 +45,8 @@ Run `bash install.sh` once as root on the benchmark's Ubuntu 24.04 x86_64 host, 
 
 Runtime configuration is exactly `DATABASE_URL`, `JWT_SECRET`, `HOST` and `PORT`. `start.sh` executes the server in the foreground. Build-time experiment controls are documented in [PERFORMANCE.md](docs/PERFORMANCE.md).
 
+The Linux build defaults are four HTTP reactors, 40 PostgreSQL connections (16 read owners and 24 dedicated writers), 12,288 admitted tasks and read groups of at most 512 requests. Two shared password workers calibrate complete bcrypt calculations at startup, choosing the fastest supported width up to four; the Oracle EPYC used three. The maximum collection window is 100 ms. Closed profile groups, favorite groups, distinct page enrichment and compact page results are enabled. Every recipient retains its own viewer flags. macOS keeps the smaller interactive defaults.
+
 ## Checks
 
 ```sh
