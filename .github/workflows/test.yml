@@ -116,14 +116,14 @@ jobs:
           sudo prlimit --pid $$ --nofile=200000:200000
           ulimit -n 200000
           cd submissions/zig-reactor-Chemske
-          zig build test -Dpg-root="$PGROOT" -Dreactors=4 -Ddb-connections=40 -Dwrite-connections=24 -Dshared-bcrypt=true -Dbcrypt-workers=2 -Dread-batch-size=512 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true -Dshared-feed-hubs=true -Dprofile-batch=true -Dshared-article-json=true -Dcompact-pages=true -Dshared-feed-candidates=true -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=100 -Dbcrypt-calibrate=true --summary all
-          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=1 -Ddb-connections=4 -Dread-batch-size=512 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true -Dshared-feed-hubs=true -Dprofile-batch=true -Dshared-article-json=true -Dcompact-pages=true -Dshared-feed-candidates=true
+          zig build test -Dpg-root="$PGROOT" -Dreactors=4 -Ddb-connections=40 -Dwrite-connections=24 -Dshared-bcrypt=true -Dbcrypt-workers=2 -Dread-batch-size=512 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true -Dshared-feed-hubs=true -Dprofile-batch=true -Dshared-article-json=true -Dcompact-pages=true -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=100 -Dbcrypt-calibrate=true --summary all
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=1 -Ddb-connections=4 -Dread-batch-size=512 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true -Dshared-feed-hubs=true -Dprofile-batch=true -Dshared-article-json=true -Dcompact-pages=true
           python3 tests/profile_batch.py
           python3 tests/feed_prune.py
           python3 tests/feed_hubs.py
           python3 tests/page_batch.py
           python3 tests/comment_batch.py --compact
-          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=4 -Ddb-connections=40 -Dwrite-connections=24 -Dshared-bcrypt=true -Dbcrypt-workers=2 -Dread-batch-size=512 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true -Dshared-feed-hubs=true -Dprofile-batch=true -Dshared-article-json=true -Dcompact-pages=true -Dshared-feed-candidates=true -Dmax-tasks=8192 -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=100 -Dbcrypt-calibrate=true
+          zig build -Doptimize=ReleaseFast -Dpg-root="$PGROOT" -Dreactors=4 -Ddb-connections=40 -Dwrite-connections=24 -Dshared-bcrypt=true -Dbcrypt-workers=2 -Dread-batch-size=512 -Dfeed-prune=true -Dcompact-comments=true -Dfavorite-batch=true -Dshared-page-metadata=true -Dloopback-no-tls=true -Dshared-feed-hubs=true -Dprofile-batch=true -Dshared-article-json=true -Dcompact-pages=true -Dmax-tasks=8192 -Dbcrypt-lanes=4 -Dbcrypt-gather-ms=100 -Dbcrypt-calibrate=true
           python3 tests/favorite_batch.py
           python3 tests/password_batch.py
           python3 tests/write_pool.py --writers 24
