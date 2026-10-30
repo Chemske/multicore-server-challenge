@@ -17,10 +17,17 @@ fn hubKeys(comptime count: bool) []const u8 {
         "shared_feed_caps AS MATERIALIZED (SELECT h.fid FROM shared_feed_hubs h WHERE EXISTS(SELECT 1 FROM articles a WHERE a.author_id=h.fid LIMIT 1 OFFSET 999)), ";
     return prefix ++
         "shared_feed_hubs AS MATERIALIZED (SELECT f.fid,max(" ++ depth ++ ") AS depth FROM keys k CROSS JOIN LATERAL unnest(k.fids) f(fid) GROUP BY f.fid HAVING count(*)>1 ORDER BY count(*) DESC,f.fid LIMIT 16), " ++
-        "shared_feed_bounds AS MATERIALIZED (SELECT h.fid,(SELECT a.id FROM articles a WHERE a.author_id=h.fid ORDER BY a.id DESC LIMIT 1 OFFSET GREATEST(h.depth,1)-1) AS floor_id FROM shared_feed_hubs h WHERE h.depth<=256), ";
+        "shared_feed_bounds AS MATERIALIZED (SELECT h.fid,(SELECT a.id FROM articles a WHERE a.author_id=h.fid ORDER BY a.id DESC LIMIT 1 OFFSET GREATEST(h.depth,1)-1) AS floor_id FROM shared_feed_hubs h WHERE h.depth<=256), " ++
+        (if (@import("build_options").shared_feed_candidates) "shared_feed_candidates AS MATERIALIZED (SELECT h.fid,ARRAY(SELECT a.id FROM articles a WHERE a.author_id=h.fid ORDER BY a.id DESC LIMIT h.depth) AS ids FROM shared_feed_hubs h WHERE h.depth<=256), " else "");
 }
 
 fn sharedFeedIds() []const u8 {
+    if (@import("build_options").shared_feed_candidates)
+        return "WITH page_bound AS MATERIALIZED (SELECT COALESCE(max(b.floor_id),'-9223372036854775808'::bigint) AS lo FROM shared_feed_bounds b WHERE b.fid=ANY(k.fids)) " ++
+            "SELECT x.id FROM unnest(k.fids) fo(fid) LEFT JOIN shared_feed_candidates sc ON sc.fid=fo.fid CROSS JOIN LATERAL (" ++
+            "(SELECT a.id FROM articles a WHERE sc.fid IS NULL AND a.author_id=fo.fid AND a.id>=(SELECT lo FROM page_bound) ORDER BY a.id DESC LIMIT " ++ depth ++ ") " ++
+            "UNION ALL SELECT s.id FROM unnest(sc.ids[1:LEAST(" ++ depth ++ ",256)::int]) s(id) WHERE s.id>=(SELECT lo FROM page_bound)" ++
+            ") x ORDER BY x.id DESC LIMIT 100 OFFSET k.off";
     return "WITH page_bound AS MATERIALIZED (SELECT COALESCE(max(b.floor_id),'-9223372036854775808'::bigint) AS lo FROM shared_feed_bounds b WHERE b.fid=ANY(k.fids)) " ++
         "SELECT x.id FROM unnest(k.fids) fo(fid) CROSS JOIN LATERAL (SELECT a.id FROM articles a WHERE a.author_id=fo.fid AND a.id>=(SELECT lo FROM page_bound) ORDER BY a.id DESC LIMIT " ++ depth ++ ") x ORDER BY x.id DESC LIMIT 100 OFFSET k.off";
 }
