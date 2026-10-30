@@ -40,6 +40,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "compact_comments", b.option(bool, "compact-comments", "Normalize overlapping comment groups within their statement") orelse false);
     options.addOption(bool, "favorite_batch", b.option(bool, "favorite-batch", "Combine already queued compatible favorite mutations") orelse false);
     options.addOption(bool, "shared_page_metadata", b.option(bool, "shared-page-metadata", "Enrich each distinct article once within a closed page group") orelse false);
+    options.addOption(bool, "shared_article_json", b.option(bool, "shared-article-json", "Encode repeated article metadata once inside a closed result group") orelse false);
     options.addOption(bool, "loopback_no_tls", b.option(bool, "loopback-no-tls", "Skip optional TLS only for an unambiguous numeric loopback database") orelse false);
     options.addOption(bool, "generic_plans", b.option(bool, "generic-plans", "Reuse generic plans on owned connections") orelse true);
     options.addOption(bool, "feed_prune", b.option(bool, "feed-prune", "Prune feed candidates using a rank proven within the current statement") orelse false);

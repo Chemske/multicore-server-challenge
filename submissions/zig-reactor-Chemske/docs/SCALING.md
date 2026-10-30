@@ -126,3 +126,9 @@ The optional `bcrypt-calibrate` control runs three complete dummy calculations a
 The optional `profile-batch` control captures compatible profile reads already waiting in the same reactor. A parameterized statement reads distinct usernames once, then computes each recipient's following flag independently. Missing usernames remain individual 404s. No later request joins the group or reuses its data. The prepared catalog now contains 48 statements, including this query, and recovery rebuilds all of them.
 
 Native checks compare 64 mixed profiles, quoted and Unicode names, distinct viewers and missing users with sequential requests. They verify fresh external changes, a disconnected primary recipient and recovery after a SQL failure. All 197 unchanged steps, the independent Go comparison, 15 mutation cases and nine recovery/concurrency scenarios passed. Performance remains an experiment until measured with separate generators.
+
+## Article encoding inside a result group
+
+The optional `shared-article-json` control decodes and standard-encodes each distinct article once within a closed result group. Each recipient still reads its own favorite and following booleans from the result. Two offsets recorded during normal JSON encoding allow those booleans to be emitted independently, without re-encoding repeated strings. The primary task owns shared metadata until followers finish; page metadata also survives the subsequent count statement. No bytes are reused by a later request or another statement result.
+
+All 27 unit checks pass, including exact JSON comparisons for every flag combination, escaped text and both full articles and body-free list entries. Grouped article and page checks cover missing resources, fresh changes, SQL errors, viewer isolation and a primary socket disconnected between page and count. The independent Go comparison and all 197 unchanged API steps pass. This remains experimental pending a workload comparison.
