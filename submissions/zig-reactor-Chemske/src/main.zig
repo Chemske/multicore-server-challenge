@@ -477,6 +477,8 @@ const Server = struct {
         members[0] = database.active.?;
         for (database.followers[0..database.follower_count], 1..) |task, index| members[index] = task.?;
         const group = members[0 .. database.follower_count + 1];
+        var shared_articles = pg.SharedArticles.init(group[0].arena.allocator());
+        defer shared_articles.deinit();
         if (database.read_group == .profiles) {
             for (group, 0..) |task, index| {
                 task.body = pg.profileBatchJson(result, index, group.len, task.arena.allocator()) catch {
@@ -509,7 +511,7 @@ const Server = struct {
             };
             for (group, 0..) |task, index| {
                 if (task.status != 200) continue;
-                task.operation.?.article = pg.singleBatchRow(result, index, task.arena.allocator()) catch {
+                task.operation.?.article = (if (@import("build_options").shared_article_json) shared_articles.rows(result, index, index + 1, true, task.arena.allocator()) else pg.singleBatchRow(result, index, task.arena.allocator())) catch {
                     task.status = 503;
                     continue;
                 };
@@ -538,7 +540,7 @@ const Server = struct {
                         continue;
                     };
                 } else {
-                    task.read.?.rows = pg.pageBatchRows(result, bounds[index], bounds[index + 1], task.arena.allocator()) catch {
+                    task.read.?.rows = (if (@import("build_options").shared_article_json) shared_articles.rows(result, bounds[index], bounds[index + 1], false, task.arena.allocator()) else pg.pageBatchRows(result, bounds[index], bounds[index + 1], task.arena.allocator())) catch {
                         task.status = 503;
                         continue;
                     };
@@ -588,7 +590,7 @@ const Server = struct {
             return;
         };
         for (group, 0..) |task, index| {
-            task.read.?.rows = pg.singleBatchRow(result, index, task.arena.allocator()) catch {
+            task.read.?.rows = (if (@import("build_options").shared_article_json) shared_articles.rows(result, index, index + 1, true, task.arena.allocator()) else pg.singleBatchRow(result, index, task.arena.allocator())) catch {
                 task.status = 503;
                 continue;
             };

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import threading
 import time
+import socket
 from urllib.parse import quote
 
 from support import Server, mint
@@ -90,7 +91,33 @@ with Proxy() as proxy, Server(results, 'page-batch-test-only', 'pagebatch', 'foc
         assert old[1]['articlesCount']+1==new[1]['articlesCount']
     latest=server.request('GET',items[0][0],token)
     assert latest[1]['articles'][0]['slug']=='page-after-snapshot'
+    # The primary arena must outlive followers even when its socket disappears
+    # between the page result and the separate count statement.
+    retained = [(items[0][0], mint(1 + i % 2, server.secret)) for i in range(32)]
+    expected_retained = [server.request('GET', path, auth) for path, auth in retained]
+    primary = socket.create_connection(('127.0.0.1', server.port), timeout=5)
+    proxy.hold_counts = True
+    proxy.release_counts.clear()
+    proxy.count_seen.clear()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(retained)+owners) as pool:
+            with lock_tags(server, mode='ACCESS EXCLUSIVE', table='users'):
+                blockers = [pool.submit(server.request, 'GET', '/api/user', token) for _ in range(owners)]
+                eventually(lambda: int(server.sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{server.database}' AND usename='conduit' AND wait_event_type='Lock'")) == owners)
+                primary.sendall(('GET '+items[0][0]+' HTTP/1.1\r\nHost: test\r\nAuthorization: Token '+token+'\r\n\r\n').encode())
+                time.sleep(.05)
+                pending = [pool.submit(server.request, 'GET', path, auth) for path, auth in retained]
+                time.sleep(.2)
+            assert proxy.count_seen.wait(5), 'no count after the primary page'
+            primary.close()
+            proxy.release_counts.set()
+            assert all(f.result(timeout=10)[0] == 200 for f in blockers)
+            assert [f.result(timeout=10) for f in pending] == expected_retained
+    finally:
+        primary.close()
+        proxy.release_counts.set()
+        proxy.hold_counts = False
     assert all(answer[0]==503 for answer in queued([('/api/articles?limit=3',token)]*32,fault=True))
     assert server.request('GET','/api/articles?limit=3',token)[0]==200
-    (results/'results.json').write_text(json.dumps({'family_query_counts':totals,'page_before_count_snapshot':True,'fresh_later_page':True,'sql_error_reuse':True},indent=2)+'\n')
-    print('PASS: all five page families, mixed viewers/windows, separate count snapshot, fresh reads and SQL faults',flush=True)
+    (results/'results.json').write_text(json.dumps({'family_query_counts':totals,'page_before_count_snapshot':True,'fresh_later_page':True,'primary_disconnect_before_count':True,'sql_error_reuse':True},indent=2)+'\n')
+    print('PASS: all five page families, mixed viewers/windows, separate count snapshot, disconnected primary, fresh reads and SQL faults',flush=True)

@@ -78,8 +78,19 @@ pub const Article = struct {
     favorited: bool,
     author: profiles.Profile,
     body: ?[]const u8 = null,
+    encoded: ?struct { bytes: []const u8, favorite_offset: usize, following_offset: usize } = null,
 
     pub fn jsonStringify(self: Article, writer: *std.json.Stringify) !void {
+        if (self.encoded) |shared| {
+            try writer.beginWriteRaw();
+            try writer.writer.writeAll(shared.bytes[0..shared.favorite_offset]);
+            try writer.writer.writeAll(if (self.favorited) "true" else "false");
+            try writer.writer.writeAll(shared.bytes[shared.favorite_offset + 5 .. shared.following_offset]);
+            try writer.writer.writeAll(if (self.author.following) "true" else "false");
+            try writer.writer.writeAll(shared.bytes[shared.following_offset + 5 ..]);
+            writer.endWriteRaw();
+            return;
+        }
         try writer.beginObject();
         inline for (.{ "slug", "title", "description", "createdAt", "updatedAt", "tagList", "favoritesCount", "favorited", "author" }) |key| {
             try writer.objectField(key);
@@ -91,7 +102,64 @@ pub const Article = struct {
         }
         try writer.endObject();
     }
+
+    // Only standard-encoded bytes and two recorded boolean positions are shared.
+    // The primary request owns these bytes until every group recipient finishes.
+    pub fn encodeForGroup(self: *Article, allocator: std.mem.Allocator) !void {
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        var writer: std.json.Stringify = .{ .writer = &output.writer };
+        try writer.beginObject();
+        inline for (.{ "slug", "title", "description", "createdAt", "updatedAt", "tagList", "favoritesCount" }) |key| {
+            try writer.objectField(key);
+            try writer.write(@field(self, key));
+        }
+        try writer.objectField("favorited");
+        try writer.beginWriteRaw();
+        const favorite_offset = output.written().len;
+        try output.writer.writeAll("false");
+        writer.endWriteRaw();
+        try writer.objectField("author");
+        try writer.beginObject();
+        inline for (.{ "username", "bio", "image" }) |key| {
+            try writer.objectField(key);
+            try writer.write(@field(self.author, key));
+        }
+        try writer.objectField("following");
+        try writer.beginWriteRaw();
+        const following_offset = output.written().len;
+        try output.writer.writeAll("false");
+        writer.endWriteRaw();
+        try writer.endObject();
+        if (self.body) |body| {
+            try writer.objectField("body");
+            try writer.write(body);
+        }
+        try writer.endObject();
+        self.encoded = .{ .bytes = try output.toOwnedSlice(), .favorite_offset = favorite_offset, .following_offset = following_offset };
+    }
 };
+
+test "shared article encoding preserves escaped text and independent viewer booleans" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const original: Article = .{ .slug = "quoted\"slug", .title = "é\n\\", .description = "following:false", .createdAt = "date", .updatedAt = "date", .tagList = &.{ "a,b", "\"" }, .favoritesCount = 12, .favorited = false, .author = .{ .username = "name", .bio = "\"following\":false}", .image = null, .following = false }, .body = "body\n\"favorited\":false" };
+    for ([_]?[]const u8{ original.body, null }) |body| {
+        var encoded = original;
+        encoded.body = body;
+        try encoded.encodeForGroup(allocator);
+        for ([_]bool{ false, true }) |favorited| for ([_]bool{ false, true }) |following| {
+            var plain = original;
+            plain.body = body;
+            plain.favorited = favorited;
+            plain.author.following = following;
+            encoded.favorited = favorited;
+            encoded.author.following = following;
+            try std.testing.expectEqualStrings(try std.json.Stringify.valueAlloc(allocator, plain, .{}), try std.json.Stringify.valueAlloc(allocator, encoded, .{}));
+        };
+    }
+}
 
 // ARRAY(SELECT non-null text) emits one dimension without an explicit dimension prefix.
 pub fn tags(allocator: std.mem.Allocator, text: []const u8) ![][]const u8 {

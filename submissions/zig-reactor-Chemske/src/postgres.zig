@@ -561,6 +561,49 @@ pub fn pageBatchRows(result: *Result, begin: usize, end: usize, allocator: std.m
     return rows;
 }
 
+pub const SharedArticles = struct {
+    const Meta = struct { value: articles.Article, bytes: usize };
+    allocator: std.mem.Allocator,
+    metadata: std.StringHashMap(Meta),
+
+    pub fn init(allocator: std.mem.Allocator) SharedArticles {
+        return .{ .allocator = allocator, .metadata = .init(allocator) };
+    }
+
+    pub fn deinit(self: *SharedArticles) void {
+        self.metadata.deinit();
+    }
+
+    pub fn rows(self: *SharedArticles, result: *Result, begin: usize, end: usize, full: bool, allocator: std.mem.Allocator) ![]articles.Article {
+        if (begin >= end or end - begin > 100) return error.DatabaseResult;
+        if (cell(result, @intCast(begin), 1) == null) {
+            if (end != begin + 1) return error.DatabaseResult;
+            return &.{};
+        }
+        const output = try allocator.alloc(articles.Article, end - begin);
+        var total: usize = 0;
+        for (output, begin..) |*article, index| {
+            const row: c_int = @intCast(index);
+            const slug = try required(result, row, 1);
+            const entry = try self.metadata.getOrPut(slug);
+            if (!entry.found_existing) {
+                errdefer _ = self.metadata.remove(slug);
+                var bytes: usize = 0;
+                var value = try articleAt(result, row, 1, self.allocator, full, &bytes);
+                try value.encodeForGroup(self.allocator);
+                entry.key_ptr.* = value.slug;
+                entry.value_ptr.* = .{ .value = value, .bytes = bytes };
+            }
+            total += entry.value_ptr.bytes;
+            if (total > 4 * 1024 * 1024) return error.ResponseTooLarge;
+            article.* = entry.value_ptr.value;
+            article.favorited = try boolean(result, row, 8);
+            article.author.following = try boolean(result, row, 12);
+        }
+        return output;
+    }
+};
+
 pub fn pageBatchCount(result: *Result, row: usize) !i64 {
     const value = std.fmt.parseInt(i64, try required(result, @intCast(row), 1), 10) catch return error.DatabaseResult;
     if (value < 0 or value > 1000) return error.DatabaseResult;
