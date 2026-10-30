@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "loopback_no_tls", b.option(bool, "loopback-no-tls", "Skip optional TLS only for an unambiguous numeric loopback database") orelse false);
     options.addOption(bool, "generic_plans", b.option(bool, "generic-plans", "Reuse generic plans on owned connections") orelse true);
     options.addOption(bool, "feed_prune", b.option(bool, "feed-prune", "Prune feed candidates using a rank proven within the current statement") orelse false);
+    options.addOption(bool, "shared_feed_hubs", b.option(bool, "shared-feed-hubs", "Derive shared feed rank and count proofs within each statement") orelse false);
     const shared_passwords = b.option(bool, "shared-bcrypt", "Share bounded password execution while keeping completions owned by each reactor") orelse false;
     options.addOption(bool, "shared_bcrypt", shared_passwords);
     const bcrypt_workers = b.option(usize, "bcrypt-workers", "Bounded bcrypt workers (1-8)") orelse 4;
