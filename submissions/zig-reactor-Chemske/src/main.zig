@@ -1162,6 +1162,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
+    _ = pg;
     _ = scheduling;
     _ = read_batch;
     _ = page_batch;

@@ -26,14 +26,19 @@ fn ids(comptime family: articles.Family) []const u8 {
 }
 
 fn pageSql(comptime family: articles.Family) [:0]const u8 {
-    return comptime requested ++
-        "keys AS (SELECT DISTINCT key,lim,off FROM requested), " ++
-        "pages AS MATERIALIZED (SELECT k.key,k.lim,k.off,a.id,a.author_id,a.slug,a.title,a.description, " ++
+    const metadata = "a.id,a.author_id,a.slug,a.title,a.description, " ++
         "to_char(a.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at, " ++
         "to_char(a.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at, " ++
         "ARRAY(SELECT (SELECT t.name FROM tags t WHERE t.id=at.tag_id) AS name FROM article_tags at WHERE at.article_id=a.id ORDER BY name) AS tags, " ++
-        "(SELECT count(*) FROM favorites f WHERE f.article_id=a.id) AS favorites,u.username,u.bio,u.image " ++
-        "FROM keys k CROSS JOIN LATERAL (" ++ ids(family) ++ ") p JOIN articles a ON a.id=p.id JOIN users u ON u.id=a.author_id), " ++
+        "(SELECT count(*) FROM favorites f WHERE f.article_id=a.id) AS favorites,u.username,u.bio,u.image ";
+    const pages = comptime if (@import("build_options").shared_page_metadata)
+        "hits AS MATERIALIZED (SELECT k.key,k.lim,k.off,p.id FROM keys k CROSS JOIN LATERAL (" ++ ids(family) ++ ") p), " ++
+            "enriched AS MATERIALIZED (SELECT " ++ metadata ++ "FROM articles a JOIN (SELECT DISTINCT id FROM hits) d ON d.id=a.id JOIN users u ON u.id=a.author_id), " ++
+            "pages AS MATERIALIZED (SELECT h.key,h.lim,h.off,e.* FROM hits h JOIN enriched e ON e.id=h.id), "
+    else
+        "pages AS MATERIALIZED (SELECT k.key,k.lim,k.off," ++ metadata ++ "FROM keys k CROSS JOIN LATERAL (" ++ ids(family) ++ ") p JOIN articles a ON a.id=p.id JOIN users u ON u.id=a.author_id), ";
+    return comptime requested ++
+        "keys AS (SELECT DISTINCT key,lim,off FROM requested), " ++ pages ++
         "page_ids AS (SELECT key,lim,off,array_agg(id) AS ids,array_agg(DISTINCT author_id) AS authors FROM pages GROUP BY key,lim,off), " ++
         "flags AS MATERIALIZED (SELECT r.ordinal, " ++
         "ARRAY(SELECT f.article_id FROM favorites f WHERE f.user_id=r.viewer AND f.article_id=ANY(p.ids)) AS fav, " ++
