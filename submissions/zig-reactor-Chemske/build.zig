@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
     const password_lanes = b.option(usize, "bcrypt-lanes", "Independent cost-ten hashes per worker batch (1-4)") orelse 1;
     if (password_lanes < 1 or password_lanes > 4) @panic("bcrypt-lanes must be 1-4");
     options.addOption(usize, "bcrypt_lanes", password_lanes);
+    options.addOption(bool, "bcrypt_calibrate", b.option(bool, "bcrypt-calibrate", "Select the fastest permitted complete bcrypt lane width at startup") orelse false);
     const gather_ms = b.option(usize, "bcrypt-gather-ms", "Maximum password batch collection window (0-100 ms)") orelse 0;
     if (gather_ms > 100 or (password_lanes == 1 and gather_ms != 0)) @panic("bcrypt-gather-ms must be 0-100, and zero for scalar workers");
     options.addOption(usize, "bcrypt_gather_ms", gather_ms);

@@ -25,6 +25,7 @@ pub const Pool = struct {
     other_pipes: [3][2]c_int = @splat(.{ -1, -1 }),
     owner_count: usize = 1,
     owner_outstanding: [4]usize = @splat(0),
+    lane_limit: usize = batch_width,
     mutex: std.Io.Mutex = .init,
     available: std.Io.Condition = .init,
     threads: [worker_count]?std.Thread = @splat(null),
@@ -38,7 +39,7 @@ pub const Pool = struct {
     gathering: bool = false,
     hash_batches: [4]u64 = @splat(0),
 
-    pub const Stats = struct { outstanding: usize, batches: [4]u64 };
+    pub const Stats = struct { outstanding: usize, batches: [4]u64, lanes: usize };
 
     pub fn stats(self: *Pool) Stats {
         return self.statsFor(0);
@@ -47,7 +48,7 @@ pub const Pool = struct {
     pub fn statsFor(self: *Pool, owner: usize) Stats {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return .{ .outstanding = self.owner_outstanding[owner], .batches = self.hash_batches };
+        return .{ .outstanding = self.owner_outstanding[owner], .batches = self.hash_batches, .lanes = self.lane_limit };
     }
 
     // The pool's address must remain stable after this call.
@@ -61,6 +62,7 @@ pub const Pool = struct {
         self.io = io;
         self.job_limit = jobs;
         self.owner_count = owners;
+        if (@import("build_options").bcrypt_calibrate) self.lane_limit = calibrate(io);
         if (c.pipe(&self.pipe) < 0) return error.CompletionPipe;
         errdefer self.stop();
         try events.nonblocking(self.pipe[0]);
@@ -148,10 +150,10 @@ pub const Pool = struct {
                 self.mutex.unlock(self.io);
                 return;
             }
-            if (gather_ms > 0 and self.pending_count < batch_width and !self.stopping) {
+            if (gather_ms > 0 and self.pending_count < self.lane_limit and !self.stopping) {
                 self.gathering = true;
                 const deadline = (std.Io.Timeout{ .duration = .{ .raw = .fromMilliseconds(gather_ms), .clock = .awake } }).toDeadline(self.io);
-                while (self.pending_count < batch_width and !self.stopping)
+                while (self.pending_count < self.lane_limit and !self.stopping)
                     self.available.waitTimeout(self.io, &self.mutex, deadline) catch break;
                 self.gathering = false;
             }
@@ -161,7 +163,7 @@ pub const Pool = struct {
                 self.mutex.unlock(self.io);
                 continue;
             }
-            const count = @min(self.pending_count, batch_width);
+            const count = @min(self.pending_count, self.lane_limit);
             var jobs: [4]*Job = undefined;
             @memcpy(jobs[0..count], self.pending[0..count]);
             self.pending_count -= count;
@@ -188,6 +190,47 @@ pub const Pool = struct {
         }
     }
 };
+
+fn calibrate(io: std.Io) usize {
+    var samples: [4][3]u64 = @splat(@splat(std.math.maxInt(u64)));
+    var checksum: u8 = 0;
+    for (0..3) |trial| {
+        for (0..batch_width) |position| {
+            const width = if (trial % 2 == 0) position + 1 else batch_width - position;
+            var storage: [4]Job = @splat(.{});
+            var jobs: [4]*Job = undefined;
+            for (storage[0..width], 0..) |*job, lane| {
+                job.password_len = 16;
+                for (job.password[0..16], 0..) |*byte, index| byte.* = @intCast(33 + (index + lane + trial) % 90);
+                for (&job.salt, 0..) |*byte, index| byte.* = @truncate(index * 29 + lane * 71 + trial * 17);
+                jobs[lane] = job;
+            }
+            const start = std.Io.Clock.awake.now(io).toMilliseconds();
+            if (lanes.process(Job, jobs[0..width]) != width) @panic("bcrypt calibration failed");
+            const elapsed: u64 = @intCast(@max(1, std.Io.Clock.awake.now(io).toMilliseconds() - start));
+            samples[width - 1][trial] = elapsed * std.time.ns_per_ms / width;
+            for (storage[0..width]) |job| {
+                if (!job.ok) @panic("bcrypt calibration failed");
+                checksum ^= job.hash[59];
+            }
+            std.crypto.secureZero(u8, std.mem.asBytes(&storage));
+        }
+    }
+    std.mem.doNotOptimizeAway(&checksum);
+    var selected: usize = 1;
+    var best: u64 = std.math.maxInt(u64);
+    var medians: [4]u64 = @splat(0);
+    for (samples[0..batch_width], 0..) |*values, index| {
+        std.mem.sort(u64, values, {}, std.sort.asc(u64));
+        medians[index] = values[1];
+        if (values[1] < best) {
+            best = values[1];
+            selected = index + 1;
+        }
+    }
+    std.log.info("bcrypt_calibration selected_lanes={d} median_ns_per_hash={any}", .{ selected, medians });
+    return selected;
+}
 
 test "upstream Go bcrypt seed is verified without caching or skipping the work" {
     const seed: [60:0]u8 = "$2a$10$ZSfEoPvlcsj2XfvsSeK25em4NZ9Jm7ntGqXuLgQfHEeZPYB8899wq".*;

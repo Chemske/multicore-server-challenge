@@ -218,16 +218,18 @@ test "independent bcrypt lanes match standard-library output for byte and length
     }
 }
 
-test "four distinct lanes retain every cost-ten round" {
+test "every supported width retains every cost-ten round" {
     const passwords = [4][]const u8{ "password123", "different password", "non-ascii é", "" };
     var salts: [4][16]u8 = undefined;
     for (&salts, 0..) |*salt, lane| {
         for (salt, 0..) |*byte, index| byte.* = @truncate(lane * 53 + index * 19);
     }
-    const actual = derive(4, passwords, salts, 10);
-    for (passwords, salts, actual) |password, salt, digest| {
-        const expected = bcrypt.bcrypt(password, &salt, .{ .rounds_log = 10, .silently_truncate_password = true });
-        try std.testing.expectEqualSlices(u8, &expected, &digest);
+    inline for (1..5) |width| {
+        const actual = derive(width, passwords[0..width].*, salts[0..width].*, 10);
+        for (passwords[0..width], salts[0..width], actual) |password, salt, digest| {
+            const expected = bcrypt.bcrypt(password, &salt, .{ .rounds_log = 10, .silently_truncate_password = true });
+            try std.testing.expectEqualSlices(u8, &expected, &digest);
+        }
     }
 }
 
