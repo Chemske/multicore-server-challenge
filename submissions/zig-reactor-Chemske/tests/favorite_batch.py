@@ -68,7 +68,7 @@ with Proxy() as proxy, Server(results, secret, 'favoritebatch', 'focus', submiss
     assert any(code == 503 for code, _ in answers)
     assert total('favorite_single') == singles, 'uncertain writes were replayed'
     assert server.sql('SELECT count(*) FROM favorites WHERE article_id=1 AND user_id BETWEEN 1 AND 16') == '16'
-    eventually(lambda: len(proxy.sessions[-1]['prepared']) == 47)
+    eventually(lambda: len(proxy.sessions[-1]['prepared']) == 48)
     eventually(lambda: int(server.sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{server.database}' AND usename='conduit' AND state='idle' AND xact_start IS NULL")) == connection_count)
     eventually(lambda: server.request('DELETE', endpoint, mint(1, secret))[0] == 200)
     assert server.sql('SELECT count(*) FROM favorites WHERE article_id=1 AND user_id=1') == '0'
