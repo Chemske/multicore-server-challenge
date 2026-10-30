@@ -207,6 +207,7 @@ fn prepareItem(index: usize) ?struct { name: [:0]const u8, sql: [:0]const u8 } {
     if (index == 33 + operations.prepared.len) return .{ .name = "batch_favorite", .sql = read_batch.favorite_sql };
     if (index == 34 + operations.prepared.len) return .{ .name = "batch_unfavorite", .sql = read_batch.unfavorite_sql };
     if (index == 35 + operations.prepared.len) return .{ .name = "batch_by_id", .sql = read_batch.by_id_sql };
+    if (index == 36 + operations.prepared.len) return .{ .name = "batch_profiles", .sql = profiles.batch_sql };
     if (index >= 32) {
         const operation_index = index - 32;
         if (operation_index >= operations.prepared.len) return null;
@@ -283,10 +284,14 @@ pub const User = struct {
 };
 
 fn field(result: *Result, column: c_int, allocator: std.mem.Allocator) !?[]const u8 {
-    if (PQgetisnull(result, 0, column) != 0) return null;
-    const len: usize = @intCast(PQgetlength(result, 0, column));
+    return fieldAt(result, 0, column, allocator);
+}
+
+fn fieldAt(result: *Result, row: c_int, column: c_int, allocator: std.mem.Allocator) !?[]const u8 {
+    if (PQgetisnull(result, row, column) != 0) return null;
+    const len: usize = @intCast(PQgetlength(result, row, column));
     if (len > 1024 * 1024) return error.ResponseTooLarge;
-    return try allocator.dupe(u8, PQgetvalue(result, 0, column)[0..len]);
+    return try allocator.dupe(u8, PQgetvalue(result, row, column)[0..len]);
 }
 
 pub fn user(result: *Result, allocator: std.mem.Allocator, login: bool) !?User {
@@ -314,6 +319,21 @@ pub fn profileJson(result: *Result, allocator: std.mem.Allocator) !?[]const u8 {
         .bio = try field(result, 2, allocator),
         .image = try field(result, 3, allocator),
         .following = flag == 't',
+    };
+    return try std.json.Stringify.valueAlloc(allocator, .{ .profile = profile }, .{});
+}
+
+pub fn profileBatchJson(result: *Result, index: usize, expected: usize, allocator: std.mem.Allocator) !?[]const u8 {
+    if (PQresultStatus(result) != 2 or PQnfields(result) != 5 or PQntuples(result) != expected) return error.DatabaseResult;
+    const row: c_int = @intCast(index);
+    const ordinal = std.fmt.parseInt(usize, try required(result, row, 0), 10) catch return error.DatabaseResult;
+    if (ordinal != index + 1) return error.DatabaseResult;
+    const username = (try fieldAt(result, row, 1, allocator)) orelse return null;
+    const profile: profiles.Profile = .{
+        .username = username,
+        .bio = try fieldAt(result, row, 2, allocator),
+        .image = try fieldAt(result, row, 3, allocator),
+        .following = try boolean(result, row, 4),
     };
     return try std.json.Stringify.valueAlloc(allocator, .{ .profile = profile }, .{});
 }
@@ -397,12 +417,12 @@ fn articleAt(result: *Result, row: c_int, offset: c_int, allocator: std.mem.Allo
     };
 }
 
-pub fn sendReadBatch(conn: *Conn, inputs: []const read_batch.Input, allocator: std.mem.Allocator, comments: bool, compact: bool) !void {
+pub fn sendReadBatch(conn: *Conn, inputs: []const read_batch.Input, allocator: std.mem.Allocator, comments: bool, compact: bool, profile: bool) !void {
     const params = try read_batch.parameters(allocator, inputs);
     if (prepared_queries) {
         const values = [_]?[*:0]const u8{ params[0].ptr, params[1].ptr };
-        if (PQsendQueryPrepared(conn, if (compact) "batch_comments_compact" else if (comments) "batch_comments" else "batch_single", 2, &values, null, null, 0) != 1) return error.DatabaseQuery;
-    } else try send(conn, if (compact) read_batch.compact_comments_sql else if (comments) read_batch.comments_sql else read_batch.single_sql, &.{ params[0], params[1] });
+        if (PQsendQueryPrepared(conn, if (profile) "batch_profiles" else if (compact) "batch_comments_compact" else if (comments) "batch_comments" else "batch_single", 2, &values, null, null, 0) != 1) return error.DatabaseQuery;
+    } else try send(conn, if (profile) profiles.batch_sql else if (compact) read_batch.compact_comments_sql else if (comments) read_batch.comments_sql else read_batch.single_sql, &.{ params[0], params[1] });
 }
 
 pub fn sendFavoriteGroup(conn: *Conn, inputs: []const read_batch.Input, allocator: std.mem.Allocator, remove: bool, reading: bool) !void {

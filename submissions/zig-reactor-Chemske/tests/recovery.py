@@ -95,7 +95,7 @@ class Proxy:
                     client.close()
                 continue
             session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'article_groups': 0, 'article_single': 0, 'comment_groups': 0, 'compact_comment_groups': 0, 'comment_single': 0, 'page_groups': 0, 'count_groups': 0, 'page_queries': 0, 'count_queries': 0, 'pause': self.pause_new}
-            session.update(favorite_groups=0, favorite_single=0, favorite_pending=False, feed_hub_preparations=0)
+            session.update(favorite_groups=0, favorite_single=0, favorite_pending=False, feed_hub_preparations=0, profile_groups=0, profile_single=0)
             self.sessions.append(session)
             self.launch(self.frontend, session)
             self.launch(self.backend, session)
@@ -136,6 +136,8 @@ class Proxy:
                     if name == b'tags': session['tags'] += 1
                     elif name == b'batch_single': session['article_groups'] += 1
                     elif name == b'page_single': session['article_single'] += 1
+                    elif name == b'batch_profiles': session['profile_groups'] += 1
+                    elif name == b'profile': session['profile_single'] += 1
                     elif name in (b'batch_comments', b'batch_comments_compact'):
                         session['comment_groups'] += 1
                         if name == b'batch_comments_compact': session['compact_comment_groups'] += 1
@@ -192,7 +194,7 @@ class Proxy:
 
 @contextmanager
 def lock_tags(server, mode='SHARE', table='tags'):
-    assert mode in ('SHARE', 'ACCESS EXCLUSIVE') and table in ('tags', 'articles', 'users', 'comments')
+    assert mode in ('SHARE', 'ACCESS EXCLUSIVE') and table in ('tags', 'articles', 'users', 'comments', 'follows')
     application = 'recovery-lock-' + uuid.uuid4().hex
     with (results / 'locker.log').open('a') as log:
         process = subprocess.Popen(['psql', '-X', '-v', 'ON_ERROR_STOP=1', '-d', server.database,
@@ -230,7 +232,7 @@ def main():
             eventually(lambda: len(proxy.sessions) >= after)
             eventually(ready)
             idle()
-            eventually(lambda: all(len(s['prepared']) == 47 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
+            eventually(lambda: all(len(s['prepared']) == 48 and s['settings'] == 1 and len(s['tuning']) == 2 for s in proxy.sessions[-connection_count:]))
 
         rebuilt(connection_count)
         checks.append('all owners finish session setup and forty-seven named preparations before use')

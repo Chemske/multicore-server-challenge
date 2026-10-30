@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(usize, "read_batch_size", read_batch_size);
     options.addOption(bool, "tag_batch", b.option(bool, "tag-batch", "Coalesce already queued tag reads") orelse true);
     options.addOption(bool, "article_batch", b.option(bool, "article-batch", "Batch already queued single-article reads") orelse true);
+    options.addOption(bool, "profile_batch", b.option(bool, "profile-batch", "Batch already queued profile reads with independent viewer flags") orelse false);
     options.addOption(bool, "page_batch", b.option(bool, "page-batch", "Batch queued list pages and subsequent capped counts") orelse true);
     options.addOption(bool, "comments_batch", b.option(bool, "comments-batch", "Batch already queued comment lists") orelse true);
     options.addOption(bool, "compact_comments", b.option(bool, "compact-comments", "Normalize overlapping comment groups within their statement") orelse false);
