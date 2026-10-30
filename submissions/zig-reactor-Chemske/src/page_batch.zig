@@ -4,6 +4,26 @@ const batch = @import("read_batch.zig");
 
 pub const Input = struct { viewer: []const u8, limit: []const u8, offset: []const u8, key: []const u8 };
 const requested = "WITH requested AS MATERIALIZED (SELECT * FROM unnest($1::bigint[],$2::bigint[],$3::bigint[],$4::text[]) WITH ORDINALITY AS r(viewer,lim,off,key,ordinal)), ";
+const shared_feed_hubs = @import("build_options").shared_feed_hubs;
+const depth = "LEAST(k.lim::numeric+k.off::numeric,9223372036854775807)::bigint";
+
+// Proofs belong to the current statement. A followed author's depth-th ID is
+// a safe page floor; 1,000 rows from one followed author prove a capped count.
+fn hubKeys(comptime count: bool) []const u8 {
+    const keys = if (count) "key" else "key,lim,off";
+    const prefix = "keys AS MATERIALIZED (SELECT k.*,ARRAY(SELECT followee_id FROM follows WHERE follower_id=k.key::bigint) AS fids FROM (SELECT DISTINCT " ++ keys ++ " FROM requested) k), ";
+    if (count) return prefix ++
+        "shared_feed_hubs AS MATERIALIZED (SELECT f.fid FROM keys k CROSS JOIN LATERAL unnest(k.fids) f(fid) GROUP BY f.fid HAVING count(*)>1 ORDER BY count(*) DESC,f.fid LIMIT 16), " ++
+        "shared_feed_caps AS MATERIALIZED (SELECT h.fid FROM shared_feed_hubs h WHERE EXISTS(SELECT 1 FROM articles a WHERE a.author_id=h.fid LIMIT 1 OFFSET 999)), ";
+    return prefix ++
+        "shared_feed_hubs AS MATERIALIZED (SELECT f.fid,max(" ++ depth ++ ") AS depth FROM keys k CROSS JOIN LATERAL unnest(k.fids) f(fid) GROUP BY f.fid HAVING count(*)>1 ORDER BY count(*) DESC,f.fid LIMIT 16), " ++
+        "shared_feed_bounds AS MATERIALIZED (SELECT h.fid,(SELECT a.id FROM articles a WHERE a.author_id=h.fid ORDER BY a.id DESC LIMIT 1 OFFSET GREATEST(h.depth,1)-1) AS floor_id FROM shared_feed_hubs h WHERE h.depth<=256), ";
+}
+
+fn sharedFeedIds() []const u8 {
+    return "WITH page_bound AS MATERIALIZED (SELECT COALESCE(max(b.floor_id),'-9223372036854775808'::bigint) AS lo FROM shared_feed_bounds b WHERE b.fid=ANY(k.fids)) " ++
+        "SELECT x.id FROM unnest(k.fids) fo(fid) CROSS JOIN LATERAL (SELECT a.id FROM articles a WHERE a.author_id=fo.fid AND a.id>=(SELECT lo FROM page_bound) ORDER BY a.id DESC LIMIT " ++ depth ++ ") x ORDER BY x.id DESC LIMIT 100 OFFSET k.off";
+}
 
 pub fn name(family: articles.Family, count: bool) [:0]const u8 {
     return switch (family) {
@@ -18,7 +38,7 @@ fn ids(comptime family: articles.Family) []const u8 {
         .tag => "SELECT at.article_id AS id FROM article_tags at WHERE at.tag_id=(SELECT id FROM tags WHERE name=k.key) ORDER BY at.article_id DESC LIMIT 100 OFFSET k.off",
         .author => "SELECT p.id FROM articles p WHERE p.author_id=(SELECT id FROM users WHERE username=k.key) ORDER BY p.id DESC LIMIT 100 OFFSET k.off",
         .favorited => "SELECT f.article_id AS id FROM favorites f WHERE f.user_id=(SELECT id FROM users WHERE username=k.key) ORDER BY f.article_id DESC LIMIT 100 OFFSET k.off",
-        .feed => articles.feedIds("k.key::bigint", "k.lim", "k.off", "100"),
+        .feed => if (shared_feed_hubs) sharedFeedIds() else articles.feedIds("k.key::bigint", "k.lim", "k.off", "100"),
         .single => unreachable,
     };
     // The constant inner bound also gives generic plans a realistic page size.
@@ -37,8 +57,8 @@ fn pageSql(comptime family: articles.Family) [:0]const u8 {
             "pages AS MATERIALIZED (SELECT h.key,h.lim,h.off,e.* FROM hits h JOIN enriched e ON e.id=h.id), "
     else
         "pages AS MATERIALIZED (SELECT k.key,k.lim,k.off," ++ metadata ++ "FROM keys k CROSS JOIN LATERAL (" ++ ids(family) ++ ") p JOIN articles a ON a.id=p.id JOIN users u ON u.id=a.author_id), ";
-    return comptime requested ++
-        "keys AS (SELECT DISTINCT key,lim,off FROM requested), " ++ pages ++
+    const keys = comptime if (family == .feed and shared_feed_hubs) hubKeys(false) else "keys AS (SELECT DISTINCT key,lim,off FROM requested), ";
+    return comptime requested ++ keys ++ pages ++
         "page_ids AS (SELECT key,lim,off,array_agg(id) AS ids,array_agg(DISTINCT author_id) AS authors FROM pages GROUP BY key,lim,off), " ++
         "flags AS MATERIALIZED (SELECT r.ordinal, " ++
         "ARRAY(SELECT f.article_id FROM favorites f WHERE f.user_id=r.viewer AND f.article_id=ANY(p.ids)) AS fav, " ++
@@ -57,7 +77,12 @@ fn countSql(comptime family: articles.Family) [:0]const u8 {
         .feed => "SELECT count(*) FROM (SELECT 1 FROM articles WHERE author_id IN (SELECT followee_id FROM follows WHERE follower_id=k.key::bigint) LIMIT 1000) s",
         .single => unreachable,
     };
-    return comptime requested ++ "keys AS (SELECT DISTINCT key FROM requested), totals AS MATERIALIZED (SELECT k.key,(" ++ counted ++ ") AS n FROM keys k) SELECT r.ordinal,t.n FROM requested r JOIN totals t ON t.key=r.key ORDER BY r.ordinal";
+    const keys = comptime if (family == .feed and shared_feed_hubs) hubKeys(true) else "keys AS (SELECT DISTINCT key FROM requested), ";
+    const total = comptime if (family == .feed and shared_feed_hubs)
+        "CASE WHEN k.fids && ARRAY(SELECT fid FROM shared_feed_caps) THEN 1000::bigint ELSE (" ++ counted ++ ") END"
+    else
+        "(" ++ counted ++ ")";
+    return comptime requested ++ keys ++ "totals AS MATERIALIZED (SELECT k.key," ++ total ++ " AS n FROM keys k) SELECT r.ordinal,t.n FROM requested r JOIN totals t ON t.key=r.key ORDER BY r.ordinal";
 }
 
 pub fn statement(family: articles.Family, count: bool) [:0]const u8 {

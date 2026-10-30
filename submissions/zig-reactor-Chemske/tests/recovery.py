@@ -95,7 +95,7 @@ class Proxy:
                     client.close()
                 continue
             session = {'sockets': (client, backend), 'prepared': set(), 'settings': 0, 'tuning': set(), 'tags': 0, 'article_groups': 0, 'article_single': 0, 'comment_groups': 0, 'compact_comment_groups': 0, 'comment_single': 0, 'page_groups': 0, 'count_groups': 0, 'page_queries': 0, 'count_queries': 0, 'pause': self.pause_new}
-            session.update(favorite_groups=0, favorite_single=0, favorite_pending=False)
+            session.update(favorite_groups=0, favorite_single=0, favorite_pending=False, feed_hub_preparations=0)
             self.sessions.append(session)
             self.launch(self.frontend, session)
             self.launch(self.backend, session)
@@ -120,6 +120,8 @@ class Proxy:
                     name, statement = body.split(b'\0', 1)
                     if name:
                         session['prepared'].add(name.decode('ascii'))
+                        if b'shared_feed_hubs AS MATERIALIZED' in statement:
+                            session['feed_hub_preparations'] += 1
                     elif statement.startswith(b"SET statement_timeout = '8s'\0"):
                         session['settings'] += 1
                     elif statement.startswith(b'SET jit = off\0') or statement.startswith(b'SET plan_cache_mode = '):
