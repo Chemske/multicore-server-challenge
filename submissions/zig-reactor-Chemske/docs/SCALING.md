@@ -156,3 +156,9 @@ The plain Linux build at `1f32410627405c139eb926a2ece95bbd9ddc7a5f` passed the u
 | Five-minute hold | **120,000** | **30,254** | **162.687** | **470.783** | **653.823** | **0.1024%** | **Pass** |
 
 The 150,000- and 190,000-user probes also failed. [Sanitized aggregate evidence](../benchmarks/results/v2-oracle.json) retains every probe and hold, endpoint distributions, generator load and measured target CPU/steal. The five-minute result is the capacity evidence; the higher short probe is not substituted for it. Oracle hardware and CPU steal differ from the organizer's dedicated host, so this result cannot establish a leaderboard rank or a same-machine speedup against the official v1 score.
+
+## Shared author candidate experiment
+
+The optional `shared-feed-candidates` control reads bounded article-ID prefixes for up to sixteen authors already shared by the captured feed group. The longest needed prefix is read once per author inside the page statement. Each viewer takes only its own prefix and applies the existing safe floor before the ordinary feed merge. An author needed by a window deeper than 256 retains the indexed path; sparse and missing authors remain ordinary empty prefixes. Nothing survives the statement, and counts retain their separate later snapshot.
+
+Native verification passed all 27 unit checks, 256 comparisons with the independent full feed relation, mixed page windows and viewers, the page-before-count change test, primary disconnect and SQL faults, 15 mutation cases and all 197 unchanged Zig and Go steps. The control stays disabled unless separate-generator evidence supports enabling it.
