@@ -5,7 +5,7 @@ on:
       mode:
         description: Comparison or focused Linux validation
         type: choice
-        options: [comparison, validation, scaling, crypto]
+        options: [comparison, validation, scaling, crypto, faults]
         default: comparison
 permissions:
   contents: read
@@ -69,7 +69,7 @@ jobs:
       - name: Full unchanged seed and load generator
         if: inputs.mode != 'crypto'
         run: |
-          if [ "${{ inputs.mode }}" != validation ]; then bash seed/make-seed.sh; fi
+          if [ "${{ inputs.mode }}" != validation ] && [ "${{ inputs.mode }}" != faults ]; then bash seed/make-seed.sh; fi
           bash seed/make-seed.sh --dev
           (cd examples/go && go build -trimpath -o "$CHALLENGE_WORK/tools/reference-go" .)
           (cd bench && go build -o "$CHALLENGE_WORK/tools/loadgen" ./cmd/loadgen && go build -o "$CHALLENGE_WORK/tools/conformance" ./cmd/conformance)
@@ -140,6 +140,13 @@ jobs:
           bash build.sh
           python3 tests/reactor.py --reactors 4
           python3 tests/milestone5.py
+          python3 tests/recovery.py --connections 40
+      - name: Verify favorite identities and recovery with shipping defaults
+        if: inputs.mode == 'faults'
+        run: |
+          cd submissions/zig-reactor-Chemske
+          bash build.sh
+          python3 tests/favorite_batch.py
           python3 tests/recovery.py --connections 40
       - name: Compare two and four reactors under higher offered load
         if: inputs.mode == 'scaling'
