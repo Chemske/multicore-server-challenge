@@ -35,7 +35,11 @@ pub fn main(init: std.process.Init) void {
             sample(init.io, 2, false, trial);
             sample(init.io, 3, false, trial);
             sample(init.io, 4, false, trial);
+            sample(init.io, 5, false, trial);
+            sample(init.io, 6, false, trial);
         } else {
+            sample(init.io, 6, false, trial);
+            sample(init.io, 5, false, trial);
             sample(init.io, 4, false, trial);
             sample(init.io, 3, false, trial);
             sample(init.io, 2, false, trial);
