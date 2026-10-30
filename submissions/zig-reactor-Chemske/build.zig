@@ -29,8 +29,8 @@ pub fn build(b: *std.Build) void {
     const clients = b.option(usize, "max-clients", "Maximum HTTP connections") orelse 196608;
     if (clients < 256 or clients > 262144) @panic("max-clients must be between 256 and 262144");
     options.addOption(usize, "max_clients", clients);
-    const read_batch_size = b.option(usize, "read-batch-size", "Maximum requests captured in one read group (2-128)") orelse 32;
-    if (read_batch_size < 2 or read_batch_size > 128) @panic("read-batch-size must be between 2 and 128");
+    const read_batch_size = b.option(usize, "read-batch-size", "Maximum requests captured in one read group (2-512)") orelse 32;
+    if (read_batch_size < 2 or read_batch_size > 512) @panic("read-batch-size must be between 2 and 512");
     options.addOption(usize, "read_batch_size", read_batch_size);
     options.addOption(bool, "tag_batch", b.option(bool, "tag-batch", "Coalesce already queued tag reads") orelse true);
     options.addOption(bool, "article_batch", b.option(bool, "article-batch", "Batch already queued single-article reads") orelse true);
@@ -42,8 +42,10 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "loopback_no_tls", b.option(bool, "loopback-no-tls", "Skip optional TLS only for an unambiguous numeric loopback database") orelse false);
     options.addOption(bool, "generic_plans", b.option(bool, "generic-plans", "Reuse generic plans on owned connections") orelse true);
     options.addOption(bool, "feed_prune", b.option(bool, "feed-prune", "Prune feed candidates using a rank proven within the current statement") orelse false);
+    const shared_passwords = b.option(bool, "shared-bcrypt", "Share bounded password execution while keeping completions owned by each reactor") orelse false;
+    options.addOption(bool, "shared_bcrypt", shared_passwords);
     const bcrypt_workers = b.option(usize, "bcrypt-workers", "Bounded bcrypt workers (1-8)") orelse 4;
-    if (bcrypt_workers < reactors or bcrypt_workers > 8) @panic("bcrypt-workers must be between reactors and 8");
+    if (bcrypt_workers < (if (shared_passwords) @as(usize, 1) else reactors) or bcrypt_workers > 8) @panic("bcrypt-workers must be 1-8, with at least one per reactor for independent pools");
     options.addOption(usize, "bcrypt_workers", bcrypt_workers);
     const bcrypt_jobs = b.option(usize, "bcrypt-jobs", "Maximum outstanding bcrypt jobs (16-128)") orelse 64;
     if (bcrypt_jobs < 16 or bcrypt_jobs > 128) @panic("bcrypt-jobs must be between 16 and 128");
